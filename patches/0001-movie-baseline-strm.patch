@@ -1,0 +1,42 @@
+--- pristine/handlers/sync/movie.py	2026-11-18 11:41:28.544418374 +0800
++++ cloudsubscribe/handlers/sync/movie.py	2026-11-18 11:41:34.418335008 +0800
+@@ -217,14 +217,31 @@
+                         f"现有平台优先级 {movie_history_score}"
+                     )
+                 else:
+-                    movie_history_score = -1
+-                    movie_history_size = 0
+-                    logger.info(
+-                        f"电影 {subscribe.name} 未找到真实网盘旧文件，"
+-                        "本轮无法建立洗版基线"
+-                    )
+-                    if manual_upgrade:
+-                        return transferred_count
++                    if movie_history_score > 0:
++                        # 自维护 fork 修复（上游 issue #42）：媒体服务器/整理
++                        # 历史/手动基线已给出有效评分时，允许基线独立成立，
++                        # 不再因网盘目标目录没有同名实体文件而整体清零。
++                        # 分享+STRM 玩法下源文件分享后即删，此门槛原会让电影
++                        # 洗版永远无法工作。旧文件引用保持为空，后处理替换
++                        # 逻辑会自然跳过旧文件备份与清理；基线大小为 0 时
++                        # 同分候选不做大小比较，仅评分更高才替换。
++                        upgrade_target_exists = True
++                        if movie_history_size < 0:
++                            movie_history_size = 0
++                        logger.info(
++                            f"电影 {subscribe.name} 网盘无实体旧文件，"
++                            f"以已有基线（评分 {movie_history_score}，"
++                            f"{format_size(movie_history_size)}）继续洗版比对"
++                        )
++                    else:
++                        movie_history_score = -1
++                        movie_history_size = 0
++                        logger.info(
++                            f"电影 {subscribe.name} 未找到真实网盘旧文件，"
++                            "本轮无法建立洗版基线"
++                        )
++                        if manual_upgrade:
++                            return transferred_count
+ 
+             if not manual_resources:
+                 release_date = self._calendar_date(mediainfo.release_date)

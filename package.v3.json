@@ -1,0 +1,16 @@
+{
+  "CloudSubscribe": {
+    "name": "网盘订阅助手（自维护）",
+    "description": "整合网盘能力与多渠道资源搜索，自动查找并补充订阅缺失的影视内容。【自维护 fork：基于 odomu 上游 1.7.11，含电影洗版 STRM 基线修复】",
+    "labels": "网盘,订阅,115",
+    "version": "1.7.11.1",
+    "icon": "https://raw.githubusercontent.com/odomu/MoviePilot-Plugins/main/icons/cloud.png",
+    "author": "odomu / fork by lxc093210",
+    "system_version": ">=3.0.0",
+    "level": 1,
+    "history": {
+      "v1.7.11.1": "自维护 fork 首版：修复电影洗版基线——媒体服务器/整理历史/手动基线已给出有效评分时，不再因 115 目标目录没有同名实体文件而整体清零（上游 issue #42）；旧文件引用为空，后处理自动跳过旧文件清理",
+      "v1.7.11": "上游官方版本（odomu/moviepilot-plugins）"
+    }
+  }
+}
