@@ -50,6 +50,7 @@ class MovieSyncProcessor(OwnerDelegator):
             # 检查历史记录是否已成功转存
             movie_history_score = -1  # -1 表示未转存过
             movie_history_size = 0
+            baseline_is_4k = False
             subscribe_tmdb_id = str(tmdb_id_of(subscribe) or "")
             subscribe_year = str(getattr(subscribe, "year", None) or "").strip()
             for h in history:
@@ -95,6 +96,7 @@ class MovieSyncProcessor(OwnerDelegator):
                 )
                 if manual_movie:
                     manual_name = str(manual_movie.get("file_name") or "").strip()
+                    baseline_is_4k = baseline_is_4k or self._fork_name_is_4k(manual_name)
                     manual_size = self._resource_size_bytes(manual_movie.get("file_size"))
                     manual_score = self._get_mp_rule_score(
                         manual_name, manual_size, subscribe, 0, mediainfo
@@ -143,6 +145,7 @@ class MovieSyncProcessor(OwnerDelegator):
                             or 0
                         )
                         if src_name:
+                            baseline_is_4k = baseline_is_4k or self._fork_name_is_4k(src_name)
                             rec_score = self._get_mp_rule_score(
                                 src_name, rec_size, subscribe, 0, mediainfo
                             )
@@ -169,6 +172,7 @@ class MovieSyncProcessor(OwnerDelegator):
                         movie_history_size = media_size
                     if media_server_score > movie_history_score:
                         movie_history_score = media_server_score
+                    baseline_is_4k = baseline_is_4k or self._fork_name_is_4k(rule_title, media_file.name)
                     if media_size or media_server_score > 0:
                         logger.info(
                             f"电影 {subscribe.name} 洗版基线采用媒体服务器内容："
@@ -184,6 +188,7 @@ class MovieSyncProcessor(OwnerDelegator):
                 if existing_movie:
                     upgrade_target_exists = True
                     existing_dir, existing_name, existing_file = existing_movie
+                    baseline_is_4k = baseline_is_4k or self._fork_name_is_4k(existing_name)
                     if self._strm_generate_enabled:
                         existing_strm = self._generate_strm(
                             existing_dir,
@@ -242,6 +247,12 @@ class MovieSyncProcessor(OwnerDelegator):
                         )
                         if manual_upgrade:
                             return transferred_count
+
+            if is_best_version and not manual_upgrade and upgrade_target_exists and baseline_is_4k:
+                logger.info(
+                    f"电影 {subscribe.name} 库内已是 4K，本轮跳过洗版搜索"
+                )
+                return transferred_count
 
             if not manual_resources:
                 release_date = self._calendar_date(mediainfo.release_date)
@@ -337,6 +348,9 @@ class MovieSyncProcessor(OwnerDelegator):
                 logger.info(f"未找到电影 {mediainfo.title} 的可处理资源")
                 return transferred_count
 
+            if is_best_version:
+                candidate_resources = self._fork_sort_candidates(candidate_resources)
+
             self._set_task_phase(subscribe, "筛选候选资源", 65)
             search_label = self._search_handler._search_label(
                 mediainfo, MediaType.MOVIE
@@ -387,16 +401,13 @@ class MovieSyncProcessor(OwnerDelegator):
                             subscribe,
                         )
                         preview_size = self._resource_size_bytes(resource.get("size"))
-                        preview_decision = self._should_upgrade_candidate(
-                            movie_history_score,
-                            preview_score,
-                            movie_history_size,
-                            preview_size,
-                        )
-                        if preview_matched and preview_size and not preview_decision[0]:
+                        if preview_matched and preview_size and not self._fork_candidate_better(
+                            movie_history_size, baseline_is_4k,
+                            preview_name, preview_size,
+                        ):
                             logger.info(
                                 f"电影 {mediainfo.title} 候选解锁前跳过："
-                                f"{preview_decision[1]}"
+                                "不优于库内现有版本（非 4K 且不更大）"
                             )
                             continue
                 share_url = self._resolve_candidate_resource_url(
@@ -457,26 +468,22 @@ class MovieSyncProcessor(OwnerDelegator):
                             mediainfo,
                             subscribe,
                         )
-                        if not matched:
-                            logger.debug(f"Magnet 元数据未通过平台优先级规则：{provider_name}")
-                            continue
                         magnet_size = self._resource_size_bytes(
                             resource.get("size")
                             or (resource.get("magnet_metadata") or {}).get("size")
                         )
                         magnet_upgrade = False
-                        if upgrade_target_exists and movie_history_score >= 0:
-                            magnet_upgrade, magnet_reason = self._should_upgrade_candidate(
-                                movie_history_score,
-                                current_score,
-                                movie_history_size,
-                                magnet_size,
-                            )
-                            if not magnet_upgrade:
+                        if upgrade_target_exists:
+                            if not self._fork_candidate_better(
+                                movie_history_size, baseline_is_4k,
+                                provider_name, magnet_size,
+                            ):
                                 logger.info(
-                                    f"电影 {mediainfo.title} Magnet 洗版候选跳过：{magnet_reason}"
+                                    f"电影 {mediainfo.title} Magnet 候选跳过："
+                                    "不优于库内现有版本（非 4K 且不更大）"
                                 )
                                 continue
+                            magnet_upgrade = True
                         self._set_task_phase(subscribe, "提交离线下载", 90, clear_search=True)
                         pending_key = self._queue_magnet_package(
                             resource, share_url, subscribe, mediainfo,
@@ -558,26 +565,25 @@ class MovieSyncProcessor(OwnerDelegator):
                         logger.debug(f"找到匹配文件：{file_name}")
 
                         is_upgrade = False
-                        # 洗版模式下检查是否需要升级资源
+                        # 洗版模式下检查是否需要升级资源（补丁 0003：事实判定，不比规则分数）
                         upgrade_old_size = movie_history_size
-                        if upgrade_target_exists and movie_history_score >= 0:
+                        if upgrade_target_exists:
                             candidate_size = self._resource_size_bytes(
                                 matched_file.get("size")
                             )
-                            should_upgrade, reason = self._should_upgrade_candidate(
-                                movie_history_score,
-                                current_score,
-                                movie_history_size,
-                                candidate_size,
-                            )
-                            if not should_upgrade:
+                            if not self._fork_candidate_better(
+                                movie_history_size, baseline_is_4k,
+                                file_name, candidate_size,
+                            ):
                                 logger.info(
-                                    f"电影 {mediainfo.title} 洗版候选跳过：{reason}"
+                                    f"电影 {mediainfo.title} 洗版候选跳过："
+                                    f"不优于库内现有版本（非 4K 且不更大）：{file_name}"
                                 )
                                 continue
                             is_upgrade = True
                             logger.info(
-                                f"电影 {mediainfo.title} 洗版：{reason}"
+                                f"电影 {mediainfo.title} 洗版："
+                                f"候选优于库内现有版本（4K 优先/更大）：{file_name}"
                             )
 
                         organize_enabled = getattr(self, "_organize_after_transfer", True)

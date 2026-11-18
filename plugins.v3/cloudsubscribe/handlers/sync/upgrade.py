@@ -254,6 +254,7 @@ class UpgradeService(OwnerDelegator):
             upgrade_episodes = set()  # 记录已升级的集号，用于更新 note
 
             for source, candidate_resources, is_cross_batch in resource_batches:
+                candidate_resources = self._fork_sort_candidates(candidate_resources)
                 if self._stop_requested():
                     break
                 if not episodes_to_search:
@@ -291,14 +292,9 @@ class UpgradeService(OwnerDelegator):
                             ]
                             if preview_candidates:
                                 preview_worthwhile = any(
-                                    self._should_upgrade_candidate(
-                                        local_scores.get(episode, 0),
-                                        score,
-                                        int(baseline.get(episode, {}).get("file_size") or 0),
-                                        self._resource_size_bytes(file_item.get("size")),
-                                        has_existing=episode in baseline,
-                                        suppress_when_unparsed=has_unparsed,
-                                    )[0]
+                                    self._fork_episode_better(
+                                        baseline.get(episode), file_item
+                                    )
                                     for episode, file_item, score in preview_candidates
                                 )
                                 if not preview_worthwhile:
@@ -396,19 +392,11 @@ class UpgradeService(OwnerDelegator):
                             episode_worthwhile = False
                             if episode not in baseline:
                                 episode_worthwhile = True
-                            elif provider_score > old_score:
-                                episode_worthwhile = True
-                            elif provider_score == old_score and self._upgrade_mode in {"largest", "smallest"}:
-                                if known_candidate_size:
-                                    episode_worthwhile = self._should_upgrade_candidate(
-                                        old_score,
-                                        provider_score,
-                                        int(baseline_item.get("file_size") or 0),
-                                        known_candidate_size,
-                                    )[0]
-                                else:
-                                    # 逐集大小留到下载完成后判断
-                                    episode_worthwhile = True
+                            else:
+                                episode_worthwhile = self._fork_episode_better(
+                                    baseline_item,
+                                    {"name": provider_name, "size": known_candidate_size},
+                                )
                             worthwhile = worthwhile or episode_worthwhile
                             if episode_worthwhile and episode in baseline:
                                 upgrade_baseline[str(episode)] = {
@@ -513,17 +501,13 @@ class UpgradeService(OwnerDelegator):
 
                         score_gap = new_score - old_score
 
-                        should_upgrade, reason = self._should_upgrade_candidate(
-                            old_score,
-                            new_score,
-                            int(baseline.get(episode, {}).get("file_size") or 0),
-                            candidate_size,
-                            has_existing=episode in baseline,
-                            suppress_when_unparsed=has_unparsed,
+                        should_upgrade = self._fork_episode_better(
+                            baseline.get(episode), matched_file
                         )
+                        reason = "候选优于库内现有版本（4K 优先/更大）"
                         if not should_upgrade:
                             upgrade_skip_episodes.append(episode)
-                            upgrade_skip_reason = reason
+                            upgrade_skip_reason = "不优于库内现有版本（非 4K 且不更大）"
                             continue
 
                         logger.debug(

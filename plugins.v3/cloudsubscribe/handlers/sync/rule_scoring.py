@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -20,6 +21,60 @@ class UpgradeRuleScoringService(OwnerDelegator):
     def _resource_size_bytes(value: object) -> int:
         """将搜索卡片的大小展示值转换为字节。"""
         return max(0, int(StringUtils.num_filesize(value) or 0))
+
+    _FORK_4K_RE = re.compile(r"2160|\b4k\b|uhd", re.IGNORECASE)
+
+    @classmethod
+    def _fork_name_is_4k(cls, *names: object) -> bool:
+        """名称/标题是否标示 4K（2160p/UHD）。"""
+        text = " ".join(str(name or "") for name in names)
+        return bool(cls._FORK_4K_RE.search(text))
+
+    def _fork_candidate_better(
+            self,
+            baseline_size: int,
+            baseline_is_4k: bool,
+            cand_name: object,
+            cand_size: int,
+    ) -> bool:
+        """补丁 0003 的洗版事实判定（替代规则分数比对）。
+
+        候选是 4K 而库内不是 → 更好；库内已是 4K 而候选不是 → 不换；
+        其余情况候选更大才换；任一大小未知时不因大小否决。
+        """
+        cand_is_4k = self._fork_name_is_4k(cand_name)
+        if cand_is_4k and not baseline_is_4k:
+            return True
+        if baseline_is_4k and not cand_is_4k:
+            return False
+        if baseline_size and cand_size and cand_size <= int(baseline_size):
+            return False
+        return True
+
+    def _fork_episode_better(self, baseline_item, file_item) -> bool:
+        """剧集逐集版事实判定；无基线（缺集）恒为 True。"""
+        if not baseline_item:
+            return True
+        file_item = file_item or {}
+        return self._fork_candidate_better(
+            int(baseline_item.get("file_size") or 0),
+            self._fork_name_is_4k(
+                baseline_item.get("target_file_name"),
+                baseline_item.get("file_name"),
+            ),
+            file_item.get("name"),
+            self._resource_size_bytes(file_item.get("size")),
+        )
+
+    def _fork_sort_candidates(self, resources):
+        """候选池排序：4K 优先，其次大小降序；同级保持原有次序。"""
+        return sorted(
+            list(resources or []),
+            key=lambda r: (
+                0 if self._fork_name_is_4k(r.get("title"), r.get("name")) else 1,
+                -self._resource_size_bytes(r.get("size")),
+            ),
+        )
 
     def _should_upgrade_candidate(
             self,

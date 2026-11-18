@@ -1,0 +1,335 @@
+补丁 0003：洗版判定简化为事实比较（用户定调：挑最优，不比分数）
+洗版范围与订阅标记不变。候选池先按 4K 优先、大小降序排序；
+各判定点（电影分享/磁力/解锁预览、剧集逐集、离线下载后复核）
+不再用规则梯队分数与基线比对，改为事实判定：候选是 4K 而库内
+不是→换；库内已是 4K 而候选不是→不换；其余更大才换。电影库内
+已是 4K 时整轮跳过搜索。磁力不再因标题未命中规则而被下载前否决。
+
+--- a/handlers/sync/rule_scoring.py
++++ b/handlers/sync/rule_scoring.py
+@@ -2,6 +2,7 @@
+ 
+ import hashlib
+ import json
++import re
+ from pathlib import Path
+ from typing import Optional
+ 
+@@ -21,6 +22,60 @@
+         """将搜索卡片的大小展示值转换为字节。"""
+         return max(0, int(StringUtils.num_filesize(value) or 0))
+ 
++    _FORK_4K_RE = re.compile(r"2160|\b4k\b|uhd", re.IGNORECASE)
++
++    @classmethod
++    def _fork_name_is_4k(cls, *names: object) -> bool:
++        """名称/标题是否标示 4K（2160p/UHD）。"""
++        text = " ".join(str(name or "") for name in names)
++        return bool(cls._FORK_4K_RE.search(text))
++
++    def _fork_candidate_better(
++            self,
++            baseline_size: int,
++            baseline_is_4k: bool,
++            cand_name: object,
++            cand_size: int,
++    ) -> bool:
++        """补丁 0003 的洗版事实判定（替代规则分数比对）。
++
++        候选是 4K 而库内不是 → 更好；库内已是 4K 而候选不是 → 不换；
++        其余情况候选更大才换；任一大小未知时不因大小否决。
++        """
++        cand_is_4k = self._fork_name_is_4k(cand_name)
++        if cand_is_4k and not baseline_is_4k:
++            return True
++        if baseline_is_4k and not cand_is_4k:
++            return False
++        if baseline_size and cand_size and cand_size <= int(baseline_size):
++            return False
++        return True
++
++    def _fork_episode_better(self, baseline_item, file_item) -> bool:
++        """剧集逐集版事实判定；无基线（缺集）恒为 True。"""
++        if not baseline_item:
++            return True
++        file_item = file_item or {}
++        return self._fork_candidate_better(
++            int(baseline_item.get("file_size") or 0),
++            self._fork_name_is_4k(
++                baseline_item.get("target_file_name"),
++                baseline_item.get("file_name"),
++            ),
++            file_item.get("name"),
++            self._resource_size_bytes(file_item.get("size")),
++        )
++
++    def _fork_sort_candidates(self, resources):
++        """候选池排序：4K 优先，其次大小降序；同级保持原有次序。"""
++        return sorted(
++            list(resources or []),
++            key=lambda r: (
++                0 if self._fork_name_is_4k(r.get("title"), r.get("name")) else 1,
++                -self._resource_size_bytes(r.get("size")),
++            ),
++        )
++
+     def _should_upgrade_candidate(
+             self,
+             old_score: int,
+--- a/handlers/sync/movie.py
++++ b/handlers/sync/movie.py
+@@ -50,6 +50,7 @@
+             # 检查历史记录是否已成功转存
+             movie_history_score = -1  # -1 表示未转存过
+             movie_history_size = 0
++            baseline_is_4k = False
+             subscribe_tmdb_id = str(tmdb_id_of(subscribe) or "")
+             subscribe_year = str(getattr(subscribe, "year", None) or "").strip()
+             for h in history:
+@@ -95,6 +96,7 @@
+                 )
+                 if manual_movie:
+                     manual_name = str(manual_movie.get("file_name") or "").strip()
++                    baseline_is_4k = baseline_is_4k or self._fork_name_is_4k(manual_name)
+                     manual_size = self._resource_size_bytes(manual_movie.get("file_size"))
+                     manual_score = self._get_mp_rule_score(
+                         manual_name, manual_size, subscribe, 0, mediainfo
+@@ -143,6 +145,7 @@
+                             or 0
+                         )
+                         if src_name:
++                            baseline_is_4k = baseline_is_4k or self._fork_name_is_4k(src_name)
+                             rec_score = self._get_mp_rule_score(
+                                 src_name, rec_size, subscribe, 0, mediainfo
+                             )
+@@ -169,6 +172,7 @@
+                         movie_history_size = media_size
+                     if media_server_score > movie_history_score:
+                         movie_history_score = media_server_score
++                    baseline_is_4k = baseline_is_4k or self._fork_name_is_4k(rule_title, media_file.name)
+                     if media_size or media_server_score > 0:
+                         logger.info(
+                             f"电影 {subscribe.name} 洗版基线采用媒体服务器内容："
+@@ -184,6 +188,7 @@
+                 if existing_movie:
+                     upgrade_target_exists = True
+                     existing_dir, existing_name, existing_file = existing_movie
++                    baseline_is_4k = baseline_is_4k or self._fork_name_is_4k(existing_name)
+                     if self._strm_generate_enabled:
+                         existing_strm = self._generate_strm(
+                             existing_dir,
+@@ -243,6 +248,12 @@
+                         if manual_upgrade:
+                             return transferred_count
+ 
++            if is_best_version and not manual_upgrade and upgrade_target_exists and baseline_is_4k:
++                logger.info(
++                    f"电影 {subscribe.name} 库内已是 4K，本轮跳过洗版搜索"
++                )
++                return transferred_count
++
+             if not manual_resources:
+                 release_date = self._calendar_date(mediainfo.release_date)
+                 if release_date and release_date > datetime.date.today():
+@@ -337,6 +348,9 @@
+                 logger.info(f"未找到电影 {mediainfo.title} 的可处理资源")
+                 return transferred_count
+ 
++            if is_best_version:
++                candidate_resources = self._fork_sort_candidates(candidate_resources)
++
+             self._set_task_phase(subscribe, "筛选候选资源", 65)
+             search_label = self._search_handler._search_label(
+                 mediainfo, MediaType.MOVIE
+@@ -387,16 +401,13 @@
+                             subscribe,
+                         )
+                         preview_size = self._resource_size_bytes(resource.get("size"))
+-                        preview_decision = self._should_upgrade_candidate(
+-                            movie_history_score,
+-                            preview_score,
+-                            movie_history_size,
+-                            preview_size,
+-                        )
+-                        if preview_matched and preview_size and not preview_decision[0]:
++                        if preview_matched and preview_size and not self._fork_candidate_better(
++                            movie_history_size, baseline_is_4k,
++                            preview_name, preview_size,
++                        ):
+                             logger.info(
+                                 f"电影 {mediainfo.title} 候选解锁前跳过："
+-                                f"{preview_decision[1]}"
++                                "不优于库内现有版本（非 4K 且不更大）"
+                             )
+                             continue
+                 share_url = self._resolve_candidate_resource_url(
+@@ -457,26 +468,22 @@
+                             mediainfo,
+                             subscribe,
+                         )
+-                        if not matched:
+-                            logger.debug(f"Magnet 元数据未通过平台优先级规则：{provider_name}")
+-                            continue
+                         magnet_size = self._resource_size_bytes(
+                             resource.get("size")
+                             or (resource.get("magnet_metadata") or {}).get("size")
+                         )
+                         magnet_upgrade = False
+-                        if upgrade_target_exists and movie_history_score >= 0:
+-                            magnet_upgrade, magnet_reason = self._should_upgrade_candidate(
+-                                movie_history_score,
+-                                current_score,
+-                                movie_history_size,
+-                                magnet_size,
+-                            )
+-                            if not magnet_upgrade:
++                        if upgrade_target_exists:
++                            if not self._fork_candidate_better(
++                                movie_history_size, baseline_is_4k,
++                                provider_name, magnet_size,
++                            ):
+                                 logger.info(
+-                                    f"电影 {mediainfo.title} Magnet 洗版候选跳过：{magnet_reason}"
++                                    f"电影 {mediainfo.title} Magnet 候选跳过："
++                                    "不优于库内现有版本（非 4K 且不更大）"
+                                 )
+                                 continue
++                            magnet_upgrade = True
+                         self._set_task_phase(subscribe, "提交离线下载", 90, clear_search=True)
+                         pending_key = self._queue_magnet_package(
+                             resource, share_url, subscribe, mediainfo,
+@@ -558,26 +565,25 @@
+                         logger.debug(f"找到匹配文件：{file_name}")
+ 
+                         is_upgrade = False
+-                        # 洗版模式下检查是否需要升级资源
++                        # 洗版模式下检查是否需要升级资源（补丁 0003：事实判定，不比规则分数）
+                         upgrade_old_size = movie_history_size
+-                        if upgrade_target_exists and movie_history_score >= 0:
++                        if upgrade_target_exists:
+                             candidate_size = self._resource_size_bytes(
+                                 matched_file.get("size")
+                             )
+-                            should_upgrade, reason = self._should_upgrade_candidate(
+-                                movie_history_score,
+-                                current_score,
+-                                movie_history_size,
+-                                candidate_size,
+-                            )
+-                            if not should_upgrade:
++                            if not self._fork_candidate_better(
++                                movie_history_size, baseline_is_4k,
++                                file_name, candidate_size,
++                            ):
+                                 logger.info(
+-                                    f"电影 {mediainfo.title} 洗版候选跳过：{reason}"
++                                    f"电影 {mediainfo.title} 洗版候选跳过："
++                                    f"不优于库内现有版本（非 4K 且不更大）：{file_name}"
+                                 )
+                                 continue
+                             is_upgrade = True
+                             logger.info(
+-                                f"电影 {mediainfo.title} 洗版：{reason}"
++                                f"电影 {mediainfo.title} 洗版："
++                                f"候选优于库内现有版本（4K 优先/更大）：{file_name}"
+                             )
+ 
+                         organize_enabled = getattr(self, "_organize_after_transfer", True)
+--- a/handlers/sync/upgrade.py
++++ b/handlers/sync/upgrade.py
+@@ -254,6 +254,7 @@
+             upgrade_episodes = set()  # 记录已升级的集号，用于更新 note
+ 
+             for source, candidate_resources, is_cross_batch in resource_batches:
++                candidate_resources = self._fork_sort_candidates(candidate_resources)
+                 if self._stop_requested():
+                     break
+                 if not episodes_to_search:
+@@ -291,14 +292,9 @@
+                             ]
+                             if preview_candidates:
+                                 preview_worthwhile = any(
+-                                    self._should_upgrade_candidate(
+-                                        local_scores.get(episode, 0),
+-                                        score,
+-                                        int(baseline.get(episode, {}).get("file_size") or 0),
+-                                        self._resource_size_bytes(file_item.get("size")),
+-                                        has_existing=episode in baseline,
+-                                        suppress_when_unparsed=has_unparsed,
+-                                    )[0]
++                                    self._fork_episode_better(
++                                        baseline.get(episode), file_item
++                                    )
+                                     for episode, file_item, score in preview_candidates
+                                 )
+                                 if not preview_worthwhile:
+@@ -396,19 +392,11 @@
+                             episode_worthwhile = False
+                             if episode not in baseline:
+                                 episode_worthwhile = True
+-                            elif provider_score > old_score:
+-                                episode_worthwhile = True
+-                            elif provider_score == old_score and self._upgrade_mode in {"largest", "smallest"}:
+-                                if known_candidate_size:
+-                                    episode_worthwhile = self._should_upgrade_candidate(
+-                                        old_score,
+-                                        provider_score,
+-                                        int(baseline_item.get("file_size") or 0),
+-                                        known_candidate_size,
+-                                    )[0]
+-                                else:
+-                                    # 逐集大小留到下载完成后判断
+-                                    episode_worthwhile = True
++                            else:
++                                episode_worthwhile = self._fork_episode_better(
++                                    baseline_item,
++                                    {"name": provider_name, "size": known_candidate_size},
++                                )
+                             worthwhile = worthwhile or episode_worthwhile
+                             if episode_worthwhile and episode in baseline:
+                                 upgrade_baseline[str(episode)] = {
+@@ -513,17 +501,13 @@
+ 
+                         score_gap = new_score - old_score
+ 
+-                        should_upgrade, reason = self._should_upgrade_candidate(
+-                            old_score,
+-                            new_score,
+-                            int(baseline.get(episode, {}).get("file_size") or 0),
+-                            candidate_size,
+-                            has_existing=episode in baseline,
+-                            suppress_when_unparsed=has_unparsed,
++                        should_upgrade = self._fork_episode_better(
++                            baseline.get(episode), matched_file
+                         )
++                        reason = "候选优于库内现有版本（4K 优先/更大）"
+                         if not should_upgrade:
+                             upgrade_skip_episodes.append(episode)
+-                            upgrade_skip_reason = reason
++                            upgrade_skip_reason = "不优于库内现有版本（非 4K 且不更大）"
+                             continue
+ 
+                         logger.debug(
+--- a/handlers/sync/postprocess.py
++++ b/handlers/sync/postprocess.py
+@@ -2443,15 +2443,14 @@
+             is_upgrade = bool(old_baseline)
+             source_size = self._resource_size_bytes(source_file.get("size"))
+             if is_upgrade:
+-                should_upgrade, reason = self._should_upgrade_candidate(
+-                    int(old_baseline.get("score") or 0),
+-                    current_score,
++                if not self._fork_candidate_better(
+                     int(old_baseline.get("size") or 0),
++                    self._fork_name_is_4k(old_baseline.get("file_name")),
++                    source_name,
+                     source_size,
+-                )
+-                if not should_upgrade:
++                ):
+                     label = f"E{int(episode):02d}" if episode else mediainfo.title
+-                    logger.debug(f"Magnet 下载后洗版候选跳过 {label}：{reason}")
++                    logger.info(f"Magnet 下载后洗版候选跳过 {label}：真实文件不优于库内现有版本（非 4K 且不更大）")
+                     continue
+             cloud_dir, target_name = self._platform_target(
+                 self._CLOUD_MEDIA_ROOT,

@@ -91,6 +91,10 @@ class Dian115ResourceService:
             on_wait_hit=lambda _: log_cache_hit(waited=True),
         )
 
+    def client_daily_limit_reached(self) -> bool:
+        """站点每日解锁上限今日是否已触发（自维护 fork 补丁 0002）。"""
+        return bool(self._client.unlock_daily_limit_reached())
+
     def unlock_share(
             self,
             share_id: int,
@@ -104,6 +108,11 @@ class Dian115ResourceService:
         normalized_share_id = int(share_id or 0)
         if normalized_share_id <= 0:
             raise Dian115Error("Dian115 分享 ID 无效")
+        if self._client.unlock_daily_limit_reached():
+            raise Dian115Error(
+                "Dian115 今日解锁额度已用完（站点每日上限），今日内不再尝试解锁",
+                code="unlock_daily_limit",
+            )
         started = time.monotonic()
         logger.debug(
             f"Dian115 准备获取分享：share_id={normalized_share_id}，"
@@ -116,9 +125,14 @@ class Dian115ResourceService:
             body["resource_id"] = int(resource_id)
         with self._client._lock:
             self._client._check_cooldown()
-            payload = self._client._unlock_gate.run(lambda: self._client._request_json(
-                "POST", "/api/portal/unlock", current_path, json=body
-            ))
+            try:
+                payload = self._client._unlock_gate.run(lambda: self._client._request_json(
+                    "POST", "/api/portal/unlock", current_path, json=body
+                ))
+            except Dian115Error as error:
+                if error.code == "unlock_daily_limit":
+                    self._client.note_unlock_daily_limit()
+                raise
         unlock = payload.get("unlock") or {}
         already = bool(
             payload.get("already") or payload.get("owner")

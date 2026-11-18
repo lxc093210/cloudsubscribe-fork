@@ -2443,15 +2443,14 @@ class PostprocessService(OwnerDelegator):
             is_upgrade = bool(old_baseline)
             source_size = self._resource_size_bytes(source_file.get("size"))
             if is_upgrade:
-                should_upgrade, reason = self._should_upgrade_candidate(
-                    int(old_baseline.get("score") or 0),
-                    current_score,
+                if not self._fork_candidate_better(
                     int(old_baseline.get("size") or 0),
+                    self._fork_name_is_4k(old_baseline.get("file_name")),
+                    source_name,
                     source_size,
-                )
-                if not should_upgrade:
+                ):
                     label = f"E{int(episode):02d}" if episode else mediainfo.title
-                    logger.debug(f"Magnet 下载后洗版候选跳过 {label}：{reason}")
+                    logger.info(f"Magnet 下载后洗版候选跳过 {label}：真实文件不优于库内现有版本（非 4K 且不更大）")
                     continue
             cloud_dir, target_name = self._platform_target(
                 self._CLOUD_MEDIA_ROOT,

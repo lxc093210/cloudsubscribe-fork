@@ -1,6 +1,7 @@
 """Dian115 门户登录、浏览器会话与受控请求客户端。"""
 
 import base64
+import datetime
 import os
 import threading
 import time
@@ -54,6 +55,7 @@ class Dian115Client:
     _SERVER_ERROR_COOLDOWN_SECONDS = 5
     _PORTAL_COOKIES = ("portal_token", "__Host-portal_token", "__Host-portal_browser")
     _SESSION_DATA_KEY = "dian115_auth_session"
+    _UNLOCK_LIMIT_DATA_KEY = "dian115_unlock_daily_limit"
     _PROOF_RETRY_CODES = ("browser_proof_required", "browser_proof_invalid")
     _AUTH_RETRY_CODES = (
         "unauthorized", "auth_required", "invalid_token", "token_revoked", "no_token",
@@ -108,6 +110,7 @@ class Dian115Client:
         self._turnstile_policy = None
         self._get_data_func = get_data_func
         self._save_data_func = save_data_func
+        self._unlock_limit_day: Optional[str] = None
         self._lock = threading.RLock()
         self._request_gate = RequestGate.shared(
             "Dian115",
@@ -276,6 +279,48 @@ class Dian115Client:
                 code="rate_limited" if status in {0, 403, 429} else "server_cooldown",
                 status_code=status,
             )
+
+    def unlock_daily_limit_reached(self) -> bool:
+        """站点每日解锁上限今日是否已触发（自维护 fork 补丁 0002）。
+
+        站点以 unlock_daily_limit 拒绝解锁后，继续尝试只会换来 429
+        风控冷却、连累同账号的搜索查询。此处把触发日期持久化，今日
+        内解锁改为本地快速失败，次日自动恢复。
+        """
+        today = datetime.date.today().isoformat()
+        if self._unlock_limit_day is None:
+            self._unlock_limit_day = ""
+            if self._get_data_func:
+                try:
+                    data = self._get_data_func(self._UNLOCK_LIMIT_DATA_KEY) or {}
+                    if str(data.get("email") or "") == self._email:
+                        self._unlock_limit_day = str(data.get("day") or "")
+                except Exception:
+                    pass
+        return self._unlock_limit_day == today
+
+    def note_unlock_daily_limit(self) -> None:
+        """记录站点已返回每日解锁上限；重复触发不重复记日志。"""
+        if self.unlock_daily_limit_reached():
+            return
+        today = datetime.date.today().isoformat()
+        self._unlock_limit_day = today
+        if self._save_data_func:
+            try:
+                self._save_data_func(
+                    self._UNLOCK_LIMIT_DATA_KEY,
+                    {
+                        "email": self._email,
+                        "day": today,
+                        "updated_at": int(time.time()),
+                    },
+                )
+            except Exception as error:
+                logger.debug(f"Dian115 持久化解锁上限状态失败：{error}")
+        logger.info(
+            "Dian115 站点已返回每日解锁上限（unlock_daily_limit），"
+            "今日内停止解锁尝试（搜索查询不受影响），次日自动恢复"
+        )
 
     def _raw_request(self, method: str, path: str, **kwargs):
         self._check_cooldown()

@@ -1,0 +1,138 @@
+补丁 0002：Dian115 每日解锁上限熔断
+站点返回 unlock_daily_limit 后，今日内解锁改为本地快速失败并持久化
+触发日期，避免注定失败的解锁请求反复触发 429 风控冷却、连累同
+账号搜索查询；次日自动恢复。已解锁缓存链接不受影响。
+
+--- a/search/dian115/client.py
++++ b/search/dian115/client.py
+@@ -1,6 +1,7 @@
+ """Dian115 门户登录、浏览器会话与受控请求客户端。"""
+ 
+ import base64
++import datetime
+ import os
+ import threading
+ import time
+@@ -54,6 +55,7 @@
+     _SERVER_ERROR_COOLDOWN_SECONDS = 5
+     _PORTAL_COOKIES = ("portal_token", "__Host-portal_token", "__Host-portal_browser")
+     _SESSION_DATA_KEY = "dian115_auth_session"
++    _UNLOCK_LIMIT_DATA_KEY = "dian115_unlock_daily_limit"
+     _PROOF_RETRY_CODES = ("browser_proof_required", "browser_proof_invalid")
+     _AUTH_RETRY_CODES = (
+         "unauthorized", "auth_required", "invalid_token", "token_revoked", "no_token",
+@@ -108,6 +110,7 @@
+         self._turnstile_policy = None
+         self._get_data_func = get_data_func
+         self._save_data_func = save_data_func
++        self._unlock_limit_day: Optional[str] = None
+         self._lock = threading.RLock()
+         self._request_gate = RequestGate.shared(
+             "Dian115",
+@@ -277,6 +280,48 @@
+                 status_code=status,
+             )
+ 
++    def unlock_daily_limit_reached(self) -> bool:
++        """站点每日解锁上限今日是否已触发（自维护 fork 补丁 0002）。
++
++        站点以 unlock_daily_limit 拒绝解锁后，继续尝试只会换来 429
++        风控冷却、连累同账号的搜索查询。此处把触发日期持久化，今日
++        内解锁改为本地快速失败，次日自动恢复。
++        """
++        today = datetime.date.today().isoformat()
++        if self._unlock_limit_day is None:
++            self._unlock_limit_day = ""
++            if self._get_data_func:
++                try:
++                    data = self._get_data_func(self._UNLOCK_LIMIT_DATA_KEY) or {}
++                    if str(data.get("email") or "") == self._email:
++                        self._unlock_limit_day = str(data.get("day") or "")
++                except Exception:
++                    pass
++        return self._unlock_limit_day == today
++
++    def note_unlock_daily_limit(self) -> None:
++        """记录站点已返回每日解锁上限；重复触发不重复记日志。"""
++        if self.unlock_daily_limit_reached():
++            return
++        today = datetime.date.today().isoformat()
++        self._unlock_limit_day = today
++        if self._save_data_func:
++            try:
++                self._save_data_func(
++                    self._UNLOCK_LIMIT_DATA_KEY,
++                    {
++                        "email": self._email,
++                        "day": today,
++                        "updated_at": int(time.time()),
++                    },
++                )
++            except Exception as error:
++                logger.debug(f"Dian115 持久化解锁上限状态失败：{error}")
++        logger.info(
++            "Dian115 站点已返回每日解锁上限（unlock_daily_limit），"
++            "今日内停止解锁尝试（搜索查询不受影响），次日自动恢复"
++        )
++
+     def _raw_request(self, method: str, path: str, **kwargs):
+         self._check_cooldown()
+         try:
+--- a/search/dian115/resource.py
++++ b/search/dian115/resource.py
+@@ -91,6 +91,10 @@
+             on_wait_hit=lambda _: log_cache_hit(waited=True),
+         )
+ 
++    def client_daily_limit_reached(self) -> bool:
++        """站点每日解锁上限今日是否已触发（自维护 fork 补丁 0002）。"""
++        return bool(self._client.unlock_daily_limit_reached())
++
+     def unlock_share(
+             self,
+             share_id: int,
+@@ -104,6 +108,11 @@
+         normalized_share_id = int(share_id or 0)
+         if normalized_share_id <= 0:
+             raise Dian115Error("Dian115 分享 ID 无效")
++        if self._client.unlock_daily_limit_reached():
++            raise Dian115Error(
++                "Dian115 今日解锁额度已用完（站点每日上限），今日内不再尝试解锁",
++                code="unlock_daily_limit",
++            )
+         started = time.monotonic()
+         logger.debug(
+             f"Dian115 准备获取分享：share_id={normalized_share_id}，"
+@@ -116,9 +125,14 @@
+             body["resource_id"] = int(resource_id)
+         with self._client._lock:
+             self._client._check_cooldown()
+-            payload = self._client._unlock_gate.run(lambda: self._client._request_json(
+-                "POST", "/api/portal/unlock", current_path, json=body
+-            ))
++            try:
++                payload = self._client._unlock_gate.run(lambda: self._client._request_json(
++                    "POST", "/api/portal/unlock", current_path, json=body
++                ))
++            except Dian115Error as error:
++                if error.code == "unlock_daily_limit":
++                    self._client.note_unlock_daily_limit()
++                raise
+         unlock = payload.get("unlock") or {}
+         already = bool(
+             payload.get("already") or payload.get("owner")
+--- a/search/dian115/service.py
++++ b/search/dian115/service.py
+@@ -410,6 +410,12 @@
+                     "跳过重复解锁和积分记账"
+                 )
+                 return cached_url
++            if self._get_dian115_resources().client_daily_limit_reached():
++                logger.debug(
++                    f"{prefix} Dian115 今日解锁额度已用完（站点每日上限），跳过解锁："
++                    f"share_id={share_id}"
++                )
++                return None
+             budget_status = self._dian115_budget.status(unlock_points)
+             if not budget_status:
+                 logger.warning(

@@ -410,6 +410,12 @@ class Dian115SearchService(OwnerDelegator):
                     "跳过重复解锁和积分记账"
                 )
                 return cached_url
+            if self._get_dian115_resources().client_daily_limit_reached():
+                logger.debug(
+                    f"{prefix} Dian115 今日解锁额度已用完（站点每日上限），跳过解锁："
+                    f"share_id={share_id}"
+                )
+                return None
             budget_status = self._dian115_budget.status(unlock_points)
             if not budget_status:
                 logger.warning(
