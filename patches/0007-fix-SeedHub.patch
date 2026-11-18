@@ -1,0 +1,186 @@
+From e31439a9684bb921bdcc0d36fd97c4ff23b2eaee Mon Sep 17 00:00:00 2001
+From: lxc093210 <lixuechun137@gmail.com>
+Date: Wed, 18 Nov 2026 14:36:00 +0800
+Subject: [PATCH] =?UTF-8?q?fix:=20=E6=8E=A5=E5=85=A5=20SeedHub=20=E6=95=B4?=
+ =?UTF-8?q?=E9=A1=B5=E8=BF=87=E7=9B=BE=E6=9C=8D=E5=8A=A1?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ README.md                                     |  1 +
+ package.v3.json                               |  3 +-
+ plugins.v3/cloudsubscribe/__init__.py         |  2 +-
+ .../cloudsubscribe/search/seedhub/security.py | 27 ++++++++--
+ plugins.v3/cloudsubscribe/utils/cloudflare.py | 49 ++++++++++++++++++-
+ 5 files changed, 74 insertions(+), 8 deletions(-)
+
+diff --git a/README.md b/README.md
+index 7149a1d..8960903 100644
+--- a/README.md
++++ b/README.md
+@@ -8,6 +8,7 @@
+ 
+ | 版本 | 内容 |
+ |---|---|
++| 1.7.11.7 | 修复 SeedHub Cloudflare 403 恢复链路：调用现有求解网关的整页 JS Challenge 接口，避免门控冷却提前阻断过盾，并回注 Cookie/UA 供后续请求复用。 |
+ | 1.7.11.6 | 修复“观影”登录接口偶发返回 HTML 导致搜索中断：识别成功跳转页面，并在过盾页或临时网页场景自动重新过盾和重试一次。 |
+ | 1.7.11.5 | “观影”正式搜索的默认候选上限由 10 提升至 20，让更多不同体积和质量的资源进入统一评分；测试搜索仍按界面规则最多展示 10 条。 |
+ | 1.7.11.4 | 修复“观影”网盘资源大小误判：只解析带明确容量单位的数值，兼容 `59G`、`23G` 等写法；不再把标题年份 `2025` 识别成 `1.98 KB`。 |
+diff --git a/package.v3.json b/package.v3.json
+index f8341e9..f21c419 100644
+--- a/package.v3.json
++++ b/package.v3.json
+@@ -3,12 +3,13 @@
+     "name": "网盘订阅助手（自维护）",
+     "description": "整合网盘能力与多渠道资源搜索，自动查找并补充订阅缺失的影视内容。【自维护 fork：基于 odomu 上游 1.7.11，含观影搜索源与电影洗版 STRM 基线修复】",
+     "labels": "网盘,订阅,115",
+-    "version": "1.7.11.6",
++    "version": "1.7.11.7",
+     "icon": "https://raw.githubusercontent.com/odomu/MoviePilot-Plugins/main/icons/cloud.png",
+     "author": "odomu / fork by lxc093210",
+     "system_version": ">=3.0.0",
+     "level": 1,
+     "history": {
++      "v1.7.11.7": "修复 SeedHub Cloudflare 403 恢复链路：接入求解网关的整页 JS Challenge 接口，过盾前解除门控冷却并回注 Cookie 与浏览器指纹",
+       "v1.7.11.6": "修复观影登录接口偶发返回 HTML 时搜索失败：自动识别已登录跳转页、过盾页和临时网页，并重新过盾重试一次",
+       "v1.7.11.5": "观影正式搜索候选上限默认由 10 提升至 20，扩大进入统一质量评分的候选范围；测试搜索仍最多展示 10 条",
+       "v1.7.11.4": "修复观影资源大小误判：仅解析带容量单位的数值，避免将年份 2025 识别为 1.98 KB，并兼容 59G/23G 等标题容量",
+diff --git a/plugins.v3/cloudsubscribe/__init__.py b/plugins.v3/cloudsubscribe/__init__.py
+index 5a8c368..bf74d67 100644
+--- a/plugins.v3/cloudsubscribe/__init__.py
++++ b/plugins.v3/cloudsubscribe/__init__.py
+@@ -109,7 +109,7 @@ class CloudSubscribe(_PluginBase):
+     # 插件图标
+     plugin_icon = "https://raw.githubusercontent.com/odomu/MoviePilot-Plugins/main/icons/cloud.png"
+     # 插件版本
+-    plugin_version = "1.7.11.6"
++    plugin_version = "1.7.11.7"
+     # 插件作者
+     plugin_author = "odomu"
+     # 作者主页
+diff --git a/plugins.v3/cloudsubscribe/search/seedhub/security.py b/plugins.v3/cloudsubscribe/search/seedhub/security.py
+index 5bae61d..3d37bd1 100644
+--- a/plugins.v3/cloudsubscribe/search/seedhub/security.py
++++ b/plugins.v3/cloudsubscribe/search/seedhub/security.py
+@@ -12,7 +12,13 @@ import time
+ from typing import Any, Callable, Dict, Optional
+ from urllib.parse import urlparse
+ 
+-from ...utils.cloudflare import browser_proxy, is_cloudflare_challenge, playwright_snapshot
++from ...utils.cloudflare import (
++    browser_proxy,
++    get_cloudflare_solver,
++    is_cf_solver_enabled,
++    is_cloudflare_challenge,
++    solve_via_external_solver,
++)
+ from ...utils.http_client import RequestGate, gated_request, requests
+ 
+ 
+@@ -144,12 +150,22 @@ class SeedHubSecurity:
+                 except requests.exceptions.RequestException:
+                     pass
+ 
+-            result = playwright_snapshot(
+-                url, self._browser_proxy, max(30, self._request_timeout), self._gate
+-            )
++            # 首次 403 已被公共门控识别为质询并进入冷却。过盾必须先解除该
++            # 冷却，否则求解请求会在启动浏览器前被门控直接短路。
++            self._gate.clear_cooldown()
++            timeout = max(30, self._request_timeout)
++            if is_cf_solver_enabled():
++                result = solve_via_external_solver(
++                    url, self._proxies, timeout
++                )
++            else:
++                result = get_cloudflare_solver().solve(
++                    url, self._browser_proxy, timeout
++                )
+             if not isinstance(result, dict):
++                self._gate.activate_cooldown(30, reason="SeedHub 浏览器验证")
+                 return ""
+-            text = str(result.get("text") or "")
++            text = str(result.get("text") or result.get("html") or "")
+             if not text or is_cloudflare_challenge(text):
+                 self._gate.activate_cooldown(30, reason="SeedHub 浏览器验证")
+                 return ""
+@@ -167,4 +183,5 @@ class SeedHubSecurity:
+             self._cookie_header = "; ".join(cookies)
+             self._user_agent = str(result.get("user_agent") or "")
+             self._state_version += 1
++            self._gate.clear_cooldown()
+             return text
+diff --git a/plugins.v3/cloudsubscribe/utils/cloudflare.py b/plugins.v3/cloudsubscribe/utils/cloudflare.py
+index 6cb586d..35f15c9 100644
+--- a/plugins.v3/cloudsubscribe/utils/cloudflare.py
++++ b/plugins.v3/cloudsubscribe/utils/cloudflare.py
+@@ -612,10 +612,15 @@ class CloudflareSolverService:
+     ) -> Optional[Dict[str, Any]]:
+         """用 FlareSolverr/Byparr 穿透页面级质询，返回 cookies/user_agent/html。"""
+         endpoint = self.endpoint
+-        if not url or not endpoint or self._flavor() != "flare":
++        if not url or not endpoint:
+             return None
+ 
+         budget = max(15, min(int(timeout or 60), _SOLVER_MAX_TIMEOUT))
++        flavor = self._flavor()
++        if flavor == "turnstile":
++            return self._solve_challenge_page(url, budget)
++        if flavor != "flare":
++            return None
+         payload: Dict[str, Any] = {
+             "cmd": "request.get",
+             "url": url,
+@@ -660,6 +665,48 @@ class CloudflareSolverService:
+             "html": html,
+         }
+ 
++    def _solve_challenge_page(
++            self, url: str, timeout: int
++    ) -> Optional[Dict[str, Any]]:
++        """调用 Turnstile 网关扩展的整页 JS Challenge 求解接口。"""
++        headers: Dict[str, str] = {}
++        if key := self.key:
++            headers["X-API-Key"] = key
++        host = urlsplit(url).netloc or url
++        started = time.monotonic()
++        data = self._request(
++            "/solve-challenge",
++            {"url": url, "timeout": timeout},
++            headers=headers,
++            timeout=timeout + 20,
++        )
++        if not data or data.get("error"):
++            detail = str((data or {}).get("error") or "响应异常")
++            logger.debug(f"Cloudflare: 求解网关整页过盾失败 [{host}]：{detail[:160]}")
++            return None
++        cookies = [
++            item for item in (data.get("cookies") or [])
++            if isinstance(item, dict) and item.get("name")
++        ]
++        html = str(data.get("html") or data.get("response") or "")
++        if is_cloudflare_challenge(html):
++            logger.debug(f"Cloudflare: 求解网关整页过盾失败 [{host}]：返回内容仍带质盾")
++            return None
++        if not cookies and not html:
++            logger.debug(f"Cloudflare: 求解网关整页过盾失败 [{host}]：未返回可用凭证")
++            return None
++        logger.debug(
++            f"Cloudflare: 求解网关整页过盾成功 [{host}]"
++            f" 耗时 {time.monotonic() - started:.2f}s（cookies={len(cookies)}）"
++        )
++        return {
++            "cookies": cookies,
++            "user_agent": str(
++                data.get("user_agent") or data.get("userAgent") or ""
++            ).strip(),
++            "html": html,
++        }
++
+     def _flavor(self) -> str:
+         """识别服务形态并缓存：``/health`` 带 solver 字段即求解网关。"""
+         endpoint = self.endpoint
+-- 
+2.54.0.windows.1
+
