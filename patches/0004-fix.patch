@@ -1,0 +1,125 @@
+From ed8ebeb29ee775c64779daefdcac5ea13f13a08a Mon Sep 17 00:00:00 2001
+From: lxc093210 <lixuechun137@gmail.com>
+Date: Wed, 18 Nov 2026 13:31:09 +0800
+Subject: [PATCH] =?UTF-8?q?fix:=20=E4=BF=AE=E6=AD=A3=E8=A7=82=E5=BD=B1?=
+ =?UTF-8?q?=E8=B5=84=E6=BA=90=E5=A4=A7=E5=B0=8F=E8=AF=86=E5=88=AB?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ README.md                                     |  1 +
+ package.v3.json                               |  3 +-
+ plugins.v3/cloudsubscribe/__init__.py         |  2 +-
+ .../search/guanying/resource.py               | 30 +++++++++++++++++--
+ 4 files changed, 32 insertions(+), 4 deletions(-)
+
+diff --git a/README.md b/README.md
+index b5a3309..ee097f9 100644
+--- a/README.md
++++ b/README.md
+@@ -8,6 +8,7 @@
+ 
+ | 版本 | 内容 |
+ |---|---|
++| 1.7.11.4 | 修复“观影”网盘资源大小误判：只解析带明确容量单位的数值，兼容 `59G`、`23G` 等写法；不再把标题年份 `2025` 识别成 `1.98 KB`。 |
+ | 1.7.11.3 | 修复“观影”搜索结果始终为空：搜索页结果实际位于服务端 `_obj.search` 数据中，现直接解析该结构，不再依赖浏览器执行 JavaScript 后生成的链接。 |
+ | 1.7.11.2 | 新增“观影”搜索渠道：自动完成站点 PoW 验证并使用账号登录；按电影/剧集、标题、年份和季号严格匹配，返回真实可用的网盘分享及未加密磁力资源。 |
+ | 1.7.11.1 | 电影洗版基线修复：媒体服务器（Emby STRM 库）/整理历史/手动基线已给出有效评分时，不再因 115 目标目录没有同名实体文件而被整体清零。见 `patches/0001-movie-baseline-strm.patch`，上游 issue：[odomu/MoviePilot-Plugins#42](https://github.com/odomu/MoviePilot-Plugins/issues/42) |
+diff --git a/package.v3.json b/package.v3.json
+index 07e8a73..4670be3 100644
+--- a/package.v3.json
++++ b/package.v3.json
+@@ -3,12 +3,13 @@
+     "name": "网盘订阅助手（自维护）",
+     "description": "整合网盘能力与多渠道资源搜索，自动查找并补充订阅缺失的影视内容。【自维护 fork：基于 odomu 上游 1.7.11，含观影搜索源与电影洗版 STRM 基线修复】",
+     "labels": "网盘,订阅,115",
+-    "version": "1.7.11.3",
++    "version": "1.7.11.4",
+     "icon": "https://raw.githubusercontent.com/odomu/MoviePilot-Plugins/main/icons/cloud.png",
+     "author": "odomu / fork by lxc093210",
+     "system_version": ">=3.0.0",
+     "level": 1,
+     "history": {
++      "v1.7.11.4": "修复观影资源大小误判：仅解析带容量单位的数值，避免将年份 2025 识别为 1.98 KB，并兼容 59G/23G 等标题容量",
+       "v1.7.11.3": "修复观影搜索页解析：直接读取服务端 _obj.search 数据，不再依赖浏览器执行 JavaScript 后生成的链接",
+       "v1.7.11.2": "新增观影搜索渠道：支持浏览器 PoW 验证、账号登录、影视严格匹配及网盘/公开磁力资源解析",
+       "v1.7.11.1": "自维护 fork 首版：修复电影洗版基线——媒体服务器/整理历史/手动基线已给出有效评分时，不再因 115 目标目录没有同名实体文件而整体清零（上游 issue #42）；旧文件引用为空，后处理自动跳过旧文件清理",
+diff --git a/plugins.v3/cloudsubscribe/__init__.py b/plugins.v3/cloudsubscribe/__init__.py
+index 61f55ab..981d5dd 100644
+--- a/plugins.v3/cloudsubscribe/__init__.py
++++ b/plugins.v3/cloudsubscribe/__init__.py
+@@ -109,7 +109,7 @@ class CloudSubscribe(_PluginBase):
+     # 插件图标
+     plugin_icon = "https://raw.githubusercontent.com/odomu/MoviePilot-Plugins/main/icons/cloud.png"
+     # 插件版本
+-    plugin_version = "1.7.11.3"
++    plugin_version = "1.7.11.4"
+     # 插件作者
+     plugin_author = "odomu"
+     # 作者主页
+diff --git a/plugins.v3/cloudsubscribe/search/guanying/resource.py b/plugins.v3/cloudsubscribe/search/guanying/resource.py
+index de94f30..818efad 100644
+--- a/plugins.v3/cloudsubscribe/search/guanying/resource.py
++++ b/plugins.v3/cloudsubscribe/search/guanying/resource.py
+@@ -2,6 +2,7 @@
+ 
+ from __future__ import annotations
+ 
++import re
+ import threading
+ from typing import Any, Dict, Iterable, List, Optional
+ 
+@@ -20,6 +21,29 @@ from ..types import (
+ from ...utils.cache import create_platform_ttl_cache
+ 
+ 
++_TITLE_SIZE_RE = re.compile(
++    r"(?<![\d.])(\d+(?:\.\d+)?)\s*(PB|TB|GB|MB|KB|B|[PTGM])(?![A-Za-z])",
++    re.I,
++)
++_FIELD_SIZE_RE = re.compile(
++    r"(?<![\d.])(\d+(?:\.\d+)?)\s*(PB|TB|GB|MB|KB|B|[PTGMK])(?![A-Za-z])",
++    re.I,
++)
++
++
++def _explicit_size_bytes(value: Any, dedicated_field: bool = False) -> int:
++    """仅解析带容量单位的数值，避免把年份或 4K 当成字节数。"""
++    text = str(value or "").strip()
++    matched = (_FIELD_SIZE_RE if dedicated_field else _TITLE_SIZE_RE).search(text)
++    if not matched:
++        return 0
++    number, unit = matched.groups()
++    normalized_unit = unit.upper()
++    if len(normalized_unit) == 1:
++        normalized_unit += "B"
++    return parse_size_str(f"{number} {normalized_unit}")
++
++
+ class GuanyingResourceService:
+     """检索详情页并转换为 CloudSubscribe 的统一资源记录。"""
+ 
+@@ -140,7 +164,7 @@ class GuanyingResourceService:
+                         "title": resource_title,
+                         "url": final_url,
+                         "resource_type": resource_type,
+-                        "size": parse_size_str(resource_title),
++                        "size": _explicit_size_bytes(resource_title),
+                         "source": "guanying",
+                         "source_url": detail_url,
+                         "identity_verified": True,
+@@ -170,7 +194,9 @@ class GuanyingResourceService:
+                             "title": resource_title,
+                             "url": raw_url,
+                             "resource_type": "magnet",
+-                            "size": parse_size_str(item.get("size")),
++                            "size": _explicit_size_bytes(
++                                item.get("size"), dedicated_field=True
++                            ),
+                             "source": "guanying",
+                             "source_url": detail_url,
+                             "identity_verified": True,
+-- 
+2.54.0.windows.1
+
