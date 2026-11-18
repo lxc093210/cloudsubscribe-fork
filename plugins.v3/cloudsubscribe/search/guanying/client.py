@@ -200,39 +200,79 @@ class GuanyingClient:
         text = str(getattr(response, "text", "") or "")
         return "/user/login" in url or "登录后访问受限内容" in text or "<title>未登录" in text
 
+    @staticmethod
+    def _authenticated_html(response: Any) -> bool:
+        """判断站点是否返回了已经登录的普通网页。"""
+        text = str(getattr(response, "text", "") or "")
+        return bool(
+            re.search(r"_obj\.header\s*=", text, re.I)
+            and re.search(r"['\"]u['\"]\s*:\s*\{", text, re.I)
+            and "/user/login" not in text.casefold()
+        )
+
+    @staticmethod
+    def _page_title(response: Any) -> str:
+        text = str(getattr(response, "text", "") or "")
+        matched = re.search(r"<title[^>]*>(.*?)</title>", text, re.I | re.S)
+        return re.sub(r"\s+", " ", matched.group(1)).strip()[:80] if matched else "无标题网页"
+
+    def _confirm_logged_in(self) -> bool:
+        """登录接口返回非 JSON 时，通过首页确认会话是否已经生效。"""
+        response = self._raw_request("GET", "/", idempotent=True)
+        if self._pow_id(response.text):
+            return False
+        return not self._logged_out(response) and self._authenticated_html(response)
+
     def _login(self, force: bool = False) -> None:
         if not self.is_configured:
             raise GuanyingError("观影账号或密码未配置", "guanying_not_configured")
         with self._LOGIN_LOCK:
             if self._logged_in and not force:
                 return
-            self._ensure_pow()
-            response = self._raw_request(
-                "POST",
-                "/user/login",
-                headers={
-                    "X-Requested-With": "XMLHttpRequest",
-                    "Referer": f"{self.base_url}/user/login",
-                    "Accept": "application/json",
-                },
-                data={
-                    "code": "",
-                    "siteid": "1",
-                    "dosubmit": "1",
-                    "cookietime": "10506240",
-                    "username": self.username,
-                    "password": self.password,
-                },
-            )
-            try:
-                payload = response.json()
-            except Exception as error:
-                raise GuanyingError("观影登录响应解析失败", "guanying_login_parse_error") from error
-            if int(payload.get("code") or 0) != 200:
+            last_page_title = ""
+            for attempt in range(2):
+                self._ensure_pow()
+                response = self._raw_request(
+                    "POST",
+                    "/user/login",
+                    headers={
+                        "X-Requested-With": "XMLHttpRequest",
+                        "Referer": f"{self.base_url}/user/login",
+                        "Accept": "application/json",
+                    },
+                    data={
+                        "code": "",
+                        "siteid": "1",
+                        "dosubmit": "1",
+                        "cookietime": "10506240",
+                        "username": self.username,
+                        "password": self.password,
+                    },
+                )
+                try:
+                    payload = response.json()
+                except Exception:
+                    last_page_title = self._page_title(response)
+                    if self._authenticated_html(response) or self._confirm_logged_in():
+                        break
+                    logger.warning(
+                        f"观影登录返回非 JSON 网页（{last_page_title}），"
+                        f"尝试重新过盾登录 {attempt + 1}/2"
+                    )
+                    continue
+                if not isinstance(payload, dict):
+                    raise GuanyingError("观影登录响应格式异常", "guanying_login_parse_error")
+                if int(payload.get("code") or 0) == 200:
+                    break
                 message = str(payload.get("msg") or payload.get("message") or "登录失败")
                 if "验证码" in message or "captcha" in message.casefold():
                     raise GuanyingError("观影登录需要验证码，请稍后在网页确认账号状态再测试", "guanying_captcha_required")
                 raise GuanyingError(f"观影登录失败: {message}", "guanying_login_failed")
+            else:
+                raise GuanyingError(
+                    f"观影登录连续返回网页（{last_page_title or '未知页面'}），已自动重试",
+                    "guanying_login_html_response",
+                )
             self._logged_in = True
             self._save_session()
             logger.info("观影账号登录成功")
