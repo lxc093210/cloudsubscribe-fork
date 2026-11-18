@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Dict, List
 from urllib.parse import urlparse
@@ -11,13 +12,60 @@ from bs4 import BeautifulSoup
 
 _DETAIL_PATH_RE = re.compile(r"^/(mv|tv|ac)/([A-Za-z0-9_-]+)$", re.I)
 _INFO_HASH_RE = re.compile(r"^(?:[A-Fa-f0-9]{40}|[A-Z2-7a-z]{32})$")
+_SEARCH_DATA_RE = re.compile(r"_obj\.search\s*=\s*", re.I)
 
 
 def parse_search_results(html: str) -> List[Dict[str, str]]:
-    """从搜索页提取影视详情入口并按详情地址去重。"""
-    soup = BeautifulSoup(str(html or ""), "html.parser")
+    """从服务端脚本数据或渲染后的链接提取影视详情入口。"""
+    source = str(html or "")
     results: List[Dict[str, str]] = []
     seen = set()
+
+    def append_result(media_dir: Any, media_id: Any, title: Any) -> None:
+        clean_dir = str(media_dir or "").strip().casefold()
+        clean_id = str(media_id or "").strip()
+        clean_title = str(title or "").strip()
+        if clean_dir not in {"mv", "tv", "ac"} or not clean_id or not clean_title:
+            return
+        key = (clean_dir, clean_id)
+        if key in seen:
+            return
+        seen.add(key)
+        results.append({
+            "dir": clean_dir,
+            "id": clean_id,
+            "title": clean_title,
+            "path": f"/{clean_dir}/{clean_id}",
+        })
+
+    # 搜索页首屏把结果存进 _obj.search，由浏览器 JS 再渲染为链接。
+    matched = _SEARCH_DATA_RE.search(source)
+    if matched:
+        try:
+            payload, _ = json.JSONDecoder().raw_decode(source[matched.end():].lstrip())
+            listing = payload.get("l") if isinstance(payload, dict) else {}
+            if isinstance(listing, dict):
+                media_ids = listing.get("i") if isinstance(listing.get("i"), list) else []
+                media_dirs = listing.get("d") if isinstance(listing.get("d"), list) else []
+                titles = listing.get("title") if isinstance(listing.get("title"), list) else []
+                original_names = listing.get("name") if isinstance(listing.get("name"), list) else []
+                other_names = listing.get("ename") if isinstance(listing.get("ename"), list) else []
+                years = listing.get("year") if isinstance(listing.get("year"), list) else []
+                for index, media_id in enumerate(media_ids):
+                    names = []
+                    for values in (titles, original_names, other_names):
+                        value = str(_at(values, index) or "").strip()
+                        if value and value not in names:
+                            names.append(value)
+                    year = str(_at(years, index) or "").strip()
+                    display_title = " ".join(names)
+                    if year:
+                        display_title = f"{display_title} ({year})".strip()
+                    append_result(_at(media_dirs, index), media_id, display_title)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+
+    soup = BeautifulSoup(source, "html.parser")
     for anchor in soup.select("a[href]"):
         href = str(anchor.get("href") or "").strip()
         try:
@@ -28,19 +76,8 @@ def parse_search_results(html: str) -> List[Dict[str, str]]:
         if not matched:
             continue
         media_dir, media_id = matched.groups()
-        key = (media_dir.casefold(), media_id)
-        if key in seen:
-            continue
         title = str(anchor.get("title") or anchor.get_text(" ", strip=True) or "").strip()
-        if not title:
-            continue
-        seen.add(key)
-        results.append({
-            "dir": media_dir.casefold(),
-            "id": media_id,
-            "title": title,
-            "path": path,
-        })
+        append_result(media_dir, media_id, title)
     return results
 
 
