@@ -1,0 +1,170 @@
+From f1afeaf45bdc0b7d26ef202af86f6b33f0fd5295 Mon Sep 17 00:00:00 2001
+From: lxc093210 <lixuechun137@gmail.com>
+Date: Wed, 18 Nov 2026 13:53:13 +0800
+Subject: [PATCH] =?UTF-8?q?fix:=20=E5=AE=B9=E9=94=99=E8=A7=82=E5=BD=B1?=
+ =?UTF-8?q?=E7=99=BB=E5=BD=95=E7=BD=91=E9=A1=B5=E5=93=8D=E5=BA=94?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ README.md                                     |  1 +
+ package.v3.json                               |  3 +-
+ plugins.v3/cloudsubscribe/__init__.py         |  2 +-
+ .../cloudsubscribe/search/guanying/client.py  | 86 ++++++++++++++-----
+ 4 files changed, 67 insertions(+), 25 deletions(-)
+
+diff --git a/README.md b/README.md
+index 00c17e9..7149a1d 100644
+--- a/README.md
++++ b/README.md
+@@ -8,6 +8,7 @@
+ 
+ | 版本 | 内容 |
+ |---|---|
++| 1.7.11.6 | 修复“观影”登录接口偶发返回 HTML 导致搜索中断：识别成功跳转页面，并在过盾页或临时网页场景自动重新过盾和重试一次。 |
+ | 1.7.11.5 | “观影”正式搜索的默认候选上限由 10 提升至 20，让更多不同体积和质量的资源进入统一评分；测试搜索仍按界面规则最多展示 10 条。 |
+ | 1.7.11.4 | 修复“观影”网盘资源大小误判：只解析带明确容量单位的数值，兼容 `59G`、`23G` 等写法；不再把标题年份 `2025` 识别成 `1.98 KB`。 |
+ | 1.7.11.3 | 修复“观影”搜索结果始终为空：搜索页结果实际位于服务端 `_obj.search` 数据中，现直接解析该结构，不再依赖浏览器执行 JavaScript 后生成的链接。 |
+diff --git a/package.v3.json b/package.v3.json
+index 59fdf8e..f8341e9 100644
+--- a/package.v3.json
++++ b/package.v3.json
+@@ -3,12 +3,13 @@
+     "name": "网盘订阅助手（自维护）",
+     "description": "整合网盘能力与多渠道资源搜索，自动查找并补充订阅缺失的影视内容。【自维护 fork：基于 odomu 上游 1.7.11，含观影搜索源与电影洗版 STRM 基线修复】",
+     "labels": "网盘,订阅,115",
+-    "version": "1.7.11.5",
++    "version": "1.7.11.6",
+     "icon": "https://raw.githubusercontent.com/odomu/MoviePilot-Plugins/main/icons/cloud.png",
+     "author": "odomu / fork by lxc093210",
+     "system_version": ">=3.0.0",
+     "level": 1,
+     "history": {
++      "v1.7.11.6": "修复观影登录接口偶发返回 HTML 时搜索失败：自动识别已登录跳转页、过盾页和临时网页，并重新过盾重试一次",
+       "v1.7.11.5": "观影正式搜索候选上限默认由 10 提升至 20，扩大进入统一质量评分的候选范围；测试搜索仍最多展示 10 条",
+       "v1.7.11.4": "修复观影资源大小误判：仅解析带容量单位的数值，避免将年份 2025 识别为 1.98 KB，并兼容 59G/23G 等标题容量",
+       "v1.7.11.3": "修复观影搜索页解析：直接读取服务端 _obj.search 数据，不再依赖浏览器执行 JavaScript 后生成的链接",
+diff --git a/plugins.v3/cloudsubscribe/__init__.py b/plugins.v3/cloudsubscribe/__init__.py
+index 4fdf327..5a8c368 100644
+--- a/plugins.v3/cloudsubscribe/__init__.py
++++ b/plugins.v3/cloudsubscribe/__init__.py
+@@ -109,7 +109,7 @@ class CloudSubscribe(_PluginBase):
+     # 插件图标
+     plugin_icon = "https://raw.githubusercontent.com/odomu/MoviePilot-Plugins/main/icons/cloud.png"
+     # 插件版本
+-    plugin_version = "1.7.11.5"
++    plugin_version = "1.7.11.6"
+     # 插件作者
+     plugin_author = "odomu"
+     # 作者主页
+diff --git a/plugins.v3/cloudsubscribe/search/guanying/client.py b/plugins.v3/cloudsubscribe/search/guanying/client.py
+index 4e0d21f..9f13c88 100644
+--- a/plugins.v3/cloudsubscribe/search/guanying/client.py
++++ b/plugins.v3/cloudsubscribe/search/guanying/client.py
+@@ -200,39 +200,79 @@ class GuanyingClient:
+         text = str(getattr(response, "text", "") or "")
+         return "/user/login" in url or "登录后访问受限内容" in text or "<title>未登录" in text
+ 
++    @staticmethod
++    def _authenticated_html(response: Any) -> bool:
++        """判断站点是否返回了已经登录的普通网页。"""
++        text = str(getattr(response, "text", "") or "")
++        return bool(
++            re.search(r"_obj\.header\s*=", text, re.I)
++            and re.search(r"['\"]u['\"]\s*:\s*\{", text, re.I)
++            and "/user/login" not in text.casefold()
++        )
++
++    @staticmethod
++    def _page_title(response: Any) -> str:
++        text = str(getattr(response, "text", "") or "")
++        matched = re.search(r"<title[^>]*>(.*?)</title>", text, re.I | re.S)
++        return re.sub(r"\s+", " ", matched.group(1)).strip()[:80] if matched else "无标题网页"
++
++    def _confirm_logged_in(self) -> bool:
++        """登录接口返回非 JSON 时，通过首页确认会话是否已经生效。"""
++        response = self._raw_request("GET", "/", idempotent=True)
++        if self._pow_id(response.text):
++            return False
++        return not self._logged_out(response) and self._authenticated_html(response)
++
+     def _login(self, force: bool = False) -> None:
+         if not self.is_configured:
+             raise GuanyingError("观影账号或密码未配置", "guanying_not_configured")
+         with self._LOGIN_LOCK:
+             if self._logged_in and not force:
+                 return
+-            self._ensure_pow()
+-            response = self._raw_request(
+-                "POST",
+-                "/user/login",
+-                headers={
+-                    "X-Requested-With": "XMLHttpRequest",
+-                    "Referer": f"{self.base_url}/user/login",
+-                    "Accept": "application/json",
+-                },
+-                data={
+-                    "code": "",
+-                    "siteid": "1",
+-                    "dosubmit": "1",
+-                    "cookietime": "10506240",
+-                    "username": self.username,
+-                    "password": self.password,
+-                },
+-            )
+-            try:
+-                payload = response.json()
+-            except Exception as error:
+-                raise GuanyingError("观影登录响应解析失败", "guanying_login_parse_error") from error
+-            if int(payload.get("code") or 0) != 200:
++            last_page_title = ""
++            for attempt in range(2):
++                self._ensure_pow()
++                response = self._raw_request(
++                    "POST",
++                    "/user/login",
++                    headers={
++                        "X-Requested-With": "XMLHttpRequest",
++                        "Referer": f"{self.base_url}/user/login",
++                        "Accept": "application/json",
++                    },
++                    data={
++                        "code": "",
++                        "siteid": "1",
++                        "dosubmit": "1",
++                        "cookietime": "10506240",
++                        "username": self.username,
++                        "password": self.password,
++                    },
++                )
++                try:
++                    payload = response.json()
++                except Exception:
++                    last_page_title = self._page_title(response)
++                    if self._authenticated_html(response) or self._confirm_logged_in():
++                        break
++                    logger.warning(
++                        f"观影登录返回非 JSON 网页（{last_page_title}），"
++                        f"尝试重新过盾登录 {attempt + 1}/2"
++                    )
++                    continue
++                if not isinstance(payload, dict):
++                    raise GuanyingError("观影登录响应格式异常", "guanying_login_parse_error")
++                if int(payload.get("code") or 0) == 200:
++                    break
+                 message = str(payload.get("msg") or payload.get("message") or "登录失败")
+                 if "验证码" in message or "captcha" in message.casefold():
+                     raise GuanyingError("观影登录需要验证码，请稍后在网页确认账号状态再测试", "guanying_captcha_required")
+                 raise GuanyingError(f"观影登录失败: {message}", "guanying_login_failed")
++            else:
++                raise GuanyingError(
++                    f"观影登录连续返回网页（{last_page_title or '未知页面'}），已自动重试",
++                    "guanying_login_html_response",
++                )
+             self._logged_in = True
+             self._save_session()
+             logger.info("观影账号登录成功")
+-- 
+2.54.0.windows.1
+
