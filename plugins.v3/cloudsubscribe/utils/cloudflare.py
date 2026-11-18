@@ -612,10 +612,15 @@ class CloudflareSolverService:
     ) -> Optional[Dict[str, Any]]:
         """用 FlareSolverr/Byparr 穿透页面级质询，返回 cookies/user_agent/html。"""
         endpoint = self.endpoint
-        if not url or not endpoint or self._flavor() != "flare":
+        if not url or not endpoint:
             return None
 
         budget = max(15, min(int(timeout or 60), _SOLVER_MAX_TIMEOUT))
+        flavor = self._flavor()
+        if flavor == "turnstile":
+            return self._solve_challenge_page(url, budget)
+        if flavor != "flare":
+            return None
         payload: Dict[str, Any] = {
             "cmd": "request.get",
             "url": url,
@@ -657,6 +662,48 @@ class CloudflareSolverService:
         return {
             "cookies": cookies,
             "user_agent": str(solution.get("userAgent") or "").strip(),
+            "html": html,
+        }
+
+    def _solve_challenge_page(
+            self, url: str, timeout: int
+    ) -> Optional[Dict[str, Any]]:
+        """调用 Turnstile 网关扩展的整页 JS Challenge 求解接口。"""
+        headers: Dict[str, str] = {}
+        if key := self.key:
+            headers["X-API-Key"] = key
+        host = urlsplit(url).netloc or url
+        started = time.monotonic()
+        data = self._request(
+            "/solve-challenge",
+            {"url": url, "timeout": timeout},
+            headers=headers,
+            timeout=timeout + 20,
+        )
+        if not data or data.get("error"):
+            detail = str((data or {}).get("error") or "响应异常")
+            logger.debug(f"Cloudflare: 求解网关整页过盾失败 [{host}]：{detail[:160]}")
+            return None
+        cookies = [
+            item for item in (data.get("cookies") or [])
+            if isinstance(item, dict) and item.get("name")
+        ]
+        html = str(data.get("html") or data.get("response") or "")
+        if is_cloudflare_challenge(html):
+            logger.debug(f"Cloudflare: 求解网关整页过盾失败 [{host}]：返回内容仍带质盾")
+            return None
+        if not cookies and not html:
+            logger.debug(f"Cloudflare: 求解网关整页过盾失败 [{host}]：未返回可用凭证")
+            return None
+        logger.debug(
+            f"Cloudflare: 求解网关整页过盾成功 [{host}]"
+            f" 耗时 {time.monotonic() - started:.2f}s（cookies={len(cookies)}）"
+        )
+        return {
+            "cookies": cookies,
+            "user_agent": str(
+                data.get("user_agent") or data.get("userAgent") or ""
+            ).strip(),
             "html": html,
         }
 

@@ -12,7 +12,13 @@ import time
 from typing import Any, Callable, Dict, Optional
 from urllib.parse import urlparse
 
-from ...utils.cloudflare import browser_proxy, is_cloudflare_challenge, playwright_snapshot
+from ...utils.cloudflare import (
+    browser_proxy,
+    get_cloudflare_solver,
+    is_cf_solver_enabled,
+    is_cloudflare_challenge,
+    solve_via_external_solver,
+)
 from ...utils.http_client import RequestGate, gated_request, requests
 
 
@@ -144,12 +150,22 @@ class SeedHubSecurity:
                 except requests.exceptions.RequestException:
                     pass
 
-            result = playwright_snapshot(
-                url, self._browser_proxy, max(30, self._request_timeout), self._gate
-            )
+            # 首次 403 已被公共门控识别为质询并进入冷却。过盾必须先解除该
+            # 冷却，否则求解请求会在启动浏览器前被门控直接短路。
+            self._gate.clear_cooldown()
+            timeout = max(30, self._request_timeout)
+            if is_cf_solver_enabled():
+                result = solve_via_external_solver(
+                    url, self._proxies, timeout
+                )
+            else:
+                result = get_cloudflare_solver().solve(
+                    url, self._browser_proxy, timeout
+                )
             if not isinstance(result, dict):
+                self._gate.activate_cooldown(30, reason="SeedHub 浏览器验证")
                 return ""
-            text = str(result.get("text") or "")
+            text = str(result.get("text") or result.get("html") or "")
             if not text or is_cloudflare_challenge(text):
                 self._gate.activate_cooldown(30, reason="SeedHub 浏览器验证")
                 return ""
@@ -167,4 +183,5 @@ class SeedHubSecurity:
             self._cookie_header = "; ".join(cookies)
             self._user_agent = str(result.get("user_agent") or "")
             self._state_version += 1
+            self._gate.clear_cooldown()
             return text
