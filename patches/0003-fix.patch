@@ -1,0 +1,159 @@
+From 51e8dce35f6ad2257f0b61e341248e750241254f Mon Sep 17 00:00:00 2001
+From: lxc093210 <lixuechun137@gmail.com>
+Date: Wed, 18 Nov 2026 13:26:14 +0800
+Subject: [PATCH] =?UTF-8?q?fix:=20=E8=A7=A3=E6=9E=90=E8=A7=82=E5=BD=B1?=
+ =?UTF-8?q?=E6=9C=8D=E5=8A=A1=E7=AB=AF=E6=90=9C=E7=B4=A2=E6=95=B0=E6=8D=AE?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ README.md                                     |  1 +
+ package.v3.json                               |  3 +-
+ plugins.v3/cloudsubscribe/__init__.py         |  2 +-
+ .../cloudsubscribe/search/guanying/parser.py  | 65 +++++++++++++++----
+ 4 files changed, 55 insertions(+), 16 deletions(-)
+
+diff --git a/README.md b/README.md
+index 2e73ddc..b5a3309 100644
+--- a/README.md
++++ b/README.md
+@@ -8,6 +8,7 @@
+ 
+ | 版本 | 内容 |
+ |---|---|
++| 1.7.11.3 | 修复“观影”搜索结果始终为空：搜索页结果实际位于服务端 `_obj.search` 数据中，现直接解析该结构，不再依赖浏览器执行 JavaScript 后生成的链接。 |
+ | 1.7.11.2 | 新增“观影”搜索渠道：自动完成站点 PoW 验证并使用账号登录；按电影/剧集、标题、年份和季号严格匹配，返回真实可用的网盘分享及未加密磁力资源。 |
+ | 1.7.11.1 | 电影洗版基线修复：媒体服务器（Emby STRM 库）/整理历史/手动基线已给出有效评分时，不再因 115 目标目录没有同名实体文件而被整体清零。见 `patches/0001-movie-baseline-strm.patch`，上游 issue：[odomu/MoviePilot-Plugins#42](https://github.com/odomu/MoviePilot-Plugins/issues/42) |
+ | 1.7.11 | 上游原版，未改动（`plugins.v3/cloudsubscribe` 基底即 MP 中实际运行的版本） |
+diff --git a/package.v3.json b/package.v3.json
+index 3b592fa..07e8a73 100644
+--- a/package.v3.json
++++ b/package.v3.json
+@@ -3,12 +3,13 @@
+     "name": "网盘订阅助手（自维护）",
+     "description": "整合网盘能力与多渠道资源搜索，自动查找并补充订阅缺失的影视内容。【自维护 fork：基于 odomu 上游 1.7.11，含观影搜索源与电影洗版 STRM 基线修复】",
+     "labels": "网盘,订阅,115",
+-    "version": "1.7.11.2",
++    "version": "1.7.11.3",
+     "icon": "https://raw.githubusercontent.com/odomu/MoviePilot-Plugins/main/icons/cloud.png",
+     "author": "odomu / fork by lxc093210",
+     "system_version": ">=3.0.0",
+     "level": 1,
+     "history": {
++      "v1.7.11.3": "修复观影搜索页解析：直接读取服务端 _obj.search 数据，不再依赖浏览器执行 JavaScript 后生成的链接",
+       "v1.7.11.2": "新增观影搜索渠道：支持浏览器 PoW 验证、账号登录、影视严格匹配及网盘/公开磁力资源解析",
+       "v1.7.11.1": "自维护 fork 首版：修复电影洗版基线——媒体服务器/整理历史/手动基线已给出有效评分时，不再因 115 目标目录没有同名实体文件而整体清零（上游 issue #42）；旧文件引用为空，后处理自动跳过旧文件清理",
+       "v1.7.11": "上游官方版本（odomu/moviepilot-plugins）"
+diff --git a/plugins.v3/cloudsubscribe/__init__.py b/plugins.v3/cloudsubscribe/__init__.py
+index b48689f..61f55ab 100644
+--- a/plugins.v3/cloudsubscribe/__init__.py
++++ b/plugins.v3/cloudsubscribe/__init__.py
+@@ -109,7 +109,7 @@ class CloudSubscribe(_PluginBase):
+     # 插件图标
+     plugin_icon = "https://raw.githubusercontent.com/odomu/MoviePilot-Plugins/main/icons/cloud.png"
+     # 插件版本
+-    plugin_version = "1.7.11.2"
++    plugin_version = "1.7.11.3"
+     # 插件作者
+     plugin_author = "odomu"
+     # 作者主页
+diff --git a/plugins.v3/cloudsubscribe/search/guanying/parser.py b/plugins.v3/cloudsubscribe/search/guanying/parser.py
+index f0555f1..e962616 100644
+--- a/plugins.v3/cloudsubscribe/search/guanying/parser.py
++++ b/plugins.v3/cloudsubscribe/search/guanying/parser.py
+@@ -2,6 +2,7 @@
+ 
+ from __future__ import annotations
+ 
++import json
+ import re
+ from typing import Any, Dict, List
+ from urllib.parse import urlparse
+@@ -11,13 +12,60 @@ from bs4 import BeautifulSoup
+ 
+ _DETAIL_PATH_RE = re.compile(r"^/(mv|tv|ac)/([A-Za-z0-9_-]+)$", re.I)
+ _INFO_HASH_RE = re.compile(r"^(?:[A-Fa-f0-9]{40}|[A-Z2-7a-z]{32})$")
++_SEARCH_DATA_RE = re.compile(r"_obj\.search\s*=\s*", re.I)
+ 
+ 
+ def parse_search_results(html: str) -> List[Dict[str, str]]:
+-    """从搜索页提取影视详情入口并按详情地址去重。"""
+-    soup = BeautifulSoup(str(html or ""), "html.parser")
++    """从服务端脚本数据或渲染后的链接提取影视详情入口。"""
++    source = str(html or "")
+     results: List[Dict[str, str]] = []
+     seen = set()
++
++    def append_result(media_dir: Any, media_id: Any, title: Any) -> None:
++        clean_dir = str(media_dir or "").strip().casefold()
++        clean_id = str(media_id or "").strip()
++        clean_title = str(title or "").strip()
++        if clean_dir not in {"mv", "tv", "ac"} or not clean_id or not clean_title:
++            return
++        key = (clean_dir, clean_id)
++        if key in seen:
++            return
++        seen.add(key)
++        results.append({
++            "dir": clean_dir,
++            "id": clean_id,
++            "title": clean_title,
++            "path": f"/{clean_dir}/{clean_id}",
++        })
++
++    # 搜索页首屏把结果存进 _obj.search，由浏览器 JS 再渲染为链接。
++    matched = _SEARCH_DATA_RE.search(source)
++    if matched:
++        try:
++            payload, _ = json.JSONDecoder().raw_decode(source[matched.end():].lstrip())
++            listing = payload.get("l") if isinstance(payload, dict) else {}
++            if isinstance(listing, dict):
++                media_ids = listing.get("i") if isinstance(listing.get("i"), list) else []
++                media_dirs = listing.get("d") if isinstance(listing.get("d"), list) else []
++                titles = listing.get("title") if isinstance(listing.get("title"), list) else []
++                original_names = listing.get("name") if isinstance(listing.get("name"), list) else []
++                other_names = listing.get("ename") if isinstance(listing.get("ename"), list) else []
++                years = listing.get("year") if isinstance(listing.get("year"), list) else []
++                for index, media_id in enumerate(media_ids):
++                    names = []
++                    for values in (titles, original_names, other_names):
++                        value = str(_at(values, index) or "").strip()
++                        if value and value not in names:
++                            names.append(value)
++                    year = str(_at(years, index) or "").strip()
++                    display_title = " ".join(names)
++                    if year:
++                        display_title = f"{display_title} ({year})".strip()
++                    append_result(_at(media_dirs, index), media_id, display_title)
++        except (TypeError, ValueError, json.JSONDecodeError):
++            pass
++
++    soup = BeautifulSoup(source, "html.parser")
+     for anchor in soup.select("a[href]"):
+         href = str(anchor.get("href") or "").strip()
+         try:
+@@ -28,19 +76,8 @@ def parse_search_results(html: str) -> List[Dict[str, str]]:
+         if not matched:
+             continue
+         media_dir, media_id = matched.groups()
+-        key = (media_dir.casefold(), media_id)
+-        if key in seen:
+-            continue
+         title = str(anchor.get("title") or anchor.get_text(" ", strip=True) or "").strip()
+-        if not title:
+-            continue
+-        seen.add(key)
+-        results.append({
+-            "dir": media_dir.casefold(),
+-            "id": media_id,
+-            "title": title,
+-            "path": path,
+-        })
++        append_result(media_dir, media_id, title)
+     return results
+ 
+ 
+-- 
+2.54.0.windows.1
+
