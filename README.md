@@ -8,6 +8,7 @@
 
 | 版本 | 内容 |
 |---|---|
+| 1.7.11.2 | 新增“观影”搜索渠道：自动完成站点 PoW 验证并使用账号登录；按电影/剧集、标题、年份和季号严格匹配，返回真实可用的网盘分享及未加密磁力资源。 |
 | 1.7.11.1 | 电影洗版基线修复：媒体服务器（Emby STRM 库）/整理历史/手动基线已给出有效评分时，不再因 115 目标目录没有同名实体文件而被整体清零。见 `patches/0001-movie-baseline-strm.patch`，上游 issue：[odomu/MoviePilot-Plugins#42](https://github.com/odomu/MoviePilot-Plugins/issues/42) |
 | 1.7.11 | 上游原版，未改动（`plugins.v3/cloudsubscribe` 基底即 MP 中实际运行的版本） |
 
