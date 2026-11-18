@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -18,6 +19,29 @@ from ..types import (
     resource_type_from_url,
 )
 from ...utils.cache import create_platform_ttl_cache
+
+
+_TITLE_SIZE_RE = re.compile(
+    r"(?<![\d.])(\d+(?:\.\d+)?)\s*(PB|TB|GB|MB|KB|B|[PTGM])(?![A-Za-z])",
+    re.I,
+)
+_FIELD_SIZE_RE = re.compile(
+    r"(?<![\d.])(\d+(?:\.\d+)?)\s*(PB|TB|GB|MB|KB|B|[PTGMK])(?![A-Za-z])",
+    re.I,
+)
+
+
+def _explicit_size_bytes(value: Any, dedicated_field: bool = False) -> int:
+    """仅解析带容量单位的数值，避免把年份或 4K 当成字节数。"""
+    text = str(value or "").strip()
+    matched = (_FIELD_SIZE_RE if dedicated_field else _TITLE_SIZE_RE).search(text)
+    if not matched:
+        return 0
+    number, unit = matched.groups()
+    normalized_unit = unit.upper()
+    if len(normalized_unit) == 1:
+        normalized_unit += "B"
+    return parse_size_str(f"{number} {normalized_unit}")
 
 
 class GuanyingResourceService:
@@ -140,7 +164,7 @@ class GuanyingResourceService:
                         "title": resource_title,
                         "url": final_url,
                         "resource_type": resource_type,
-                        "size": parse_size_str(resource_title),
+                        "size": _explicit_size_bytes(resource_title),
                         "source": "guanying",
                         "source_url": detail_url,
                         "identity_verified": True,
@@ -170,7 +194,9 @@ class GuanyingResourceService:
                             "title": resource_title,
                             "url": raw_url,
                             "resource_type": "magnet",
-                            "size": parse_size_str(item.get("size")),
+                            "size": _explicit_size_bytes(
+                                item.get("size"), dedicated_field=True
+                            ),
                             "source": "guanying",
                             "source_url": detail_url,
                             "identity_verified": True,
