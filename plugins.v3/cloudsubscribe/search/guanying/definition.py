@@ -84,7 +84,7 @@ class GuanyingSourceDefinition(SearchSourceDefinition):
                         key="guanying_result_limit",
                         label="候选上限",
                         type="number",
-                        default=10,
+                        default=20,
                         min=1,
                         max=30,
                         cols=4,
@@ -123,7 +123,7 @@ class GuanyingSourceDefinition(SearchSourceDefinition):
         if not client or not client.is_configured or not resource_types:
             return None
         resources = GuanyingResourceService(client)
-        limit = int(cls.config_value(config, "guanying_result_limit", 10) or 10)
+        limit = int(cls.config_value(config, "guanying_result_limit", 20) or 20)
         search_service = GuanyingSearchService(client, resources, resource_types, limit)
         return create_guanying_provider(
             search_service,
