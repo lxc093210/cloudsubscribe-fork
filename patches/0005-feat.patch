@@ -1,0 +1,85 @@
+From 01b3e5a6472fa253b94f679f05d728c719f3162e Mon Sep 17 00:00:00 2001
+From: lxc093210 <lixuechun137@gmail.com>
+Date: Wed, 18 Nov 2026 13:37:55 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E6=89=A9=E5=A4=A7=E8=A7=82=E5=BD=B1?=
+ =?UTF-8?q?=E6=AD=A3=E5=BC=8F=E6=90=9C=E7=B4=A2=E5=80=99=E9=80=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ README.md                                               | 1 +
+ package.v3.json                                         | 3 ++-
+ plugins.v3/cloudsubscribe/__init__.py                   | 2 +-
+ plugins.v3/cloudsubscribe/search/guanying/definition.py | 4 ++--
+ 4 files changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/README.md b/README.md
+index ee097f9..00c17e9 100644
+--- a/README.md
++++ b/README.md
+@@ -8,6 +8,7 @@
+ 
+ | 版本 | 内容 |
+ |---|---|
++| 1.7.11.5 | “观影”正式搜索的默认候选上限由 10 提升至 20，让更多不同体积和质量的资源进入统一评分；测试搜索仍按界面规则最多展示 10 条。 |
+ | 1.7.11.4 | 修复“观影”网盘资源大小误判：只解析带明确容量单位的数值，兼容 `59G`、`23G` 等写法；不再把标题年份 `2025` 识别成 `1.98 KB`。 |
+ | 1.7.11.3 | 修复“观影”搜索结果始终为空：搜索页结果实际位于服务端 `_obj.search` 数据中，现直接解析该结构，不再依赖浏览器执行 JavaScript 后生成的链接。 |
+ | 1.7.11.2 | 新增“观影”搜索渠道：自动完成站点 PoW 验证并使用账号登录；按电影/剧集、标题、年份和季号严格匹配，返回真实可用的网盘分享及未加密磁力资源。 |
+diff --git a/package.v3.json b/package.v3.json
+index 4670be3..59fdf8e 100644
+--- a/package.v3.json
++++ b/package.v3.json
+@@ -3,12 +3,13 @@
+     "name": "网盘订阅助手（自维护）",
+     "description": "整合网盘能力与多渠道资源搜索，自动查找并补充订阅缺失的影视内容。【自维护 fork：基于 odomu 上游 1.7.11，含观影搜索源与电影洗版 STRM 基线修复】",
+     "labels": "网盘,订阅,115",
+-    "version": "1.7.11.4",
++    "version": "1.7.11.5",
+     "icon": "https://raw.githubusercontent.com/odomu/MoviePilot-Plugins/main/icons/cloud.png",
+     "author": "odomu / fork by lxc093210",
+     "system_version": ">=3.0.0",
+     "level": 1,
+     "history": {
++      "v1.7.11.5": "观影正式搜索候选上限默认由 10 提升至 20，扩大进入统一质量评分的候选范围；测试搜索仍最多展示 10 条",
+       "v1.7.11.4": "修复观影资源大小误判：仅解析带容量单位的数值，避免将年份 2025 识别为 1.98 KB，并兼容 59G/23G 等标题容量",
+       "v1.7.11.3": "修复观影搜索页解析：直接读取服务端 _obj.search 数据，不再依赖浏览器执行 JavaScript 后生成的链接",
+       "v1.7.11.2": "新增观影搜索渠道：支持浏览器 PoW 验证、账号登录、影视严格匹配及网盘/公开磁力资源解析",
+diff --git a/plugins.v3/cloudsubscribe/__init__.py b/plugins.v3/cloudsubscribe/__init__.py
+index 981d5dd..4fdf327 100644
+--- a/plugins.v3/cloudsubscribe/__init__.py
++++ b/plugins.v3/cloudsubscribe/__init__.py
+@@ -109,7 +109,7 @@ class CloudSubscribe(_PluginBase):
+     # 插件图标
+     plugin_icon = "https://raw.githubusercontent.com/odomu/MoviePilot-Plugins/main/icons/cloud.png"
+     # 插件版本
+-    plugin_version = "1.7.11.4"
++    plugin_version = "1.7.11.5"
+     # 插件作者
+     plugin_author = "odomu"
+     # 作者主页
+diff --git a/plugins.v3/cloudsubscribe/search/guanying/definition.py b/plugins.v3/cloudsubscribe/search/guanying/definition.py
+index ecf5214..e85b610 100644
+--- a/plugins.v3/cloudsubscribe/search/guanying/definition.py
++++ b/plugins.v3/cloudsubscribe/search/guanying/definition.py
+@@ -84,7 +84,7 @@ class GuanyingSourceDefinition(SearchSourceDefinition):
+                         key="guanying_result_limit",
+                         label="候选上限",
+                         type="number",
+-                        default=10,
++                        default=20,
+                         min=1,
+                         max=30,
+                         cols=4,
+@@ -123,7 +123,7 @@ class GuanyingSourceDefinition(SearchSourceDefinition):
+         if not client or not client.is_configured or not resource_types:
+             return None
+         resources = GuanyingResourceService(client)
+-        limit = int(cls.config_value(config, "guanying_result_limit", 10) or 10)
++        limit = int(cls.config_value(config, "guanying_result_limit", 20) or 20)
+         search_service = GuanyingSearchService(client, resources, resource_types, limit)
+         return create_guanying_provider(
+             search_service,
+-- 
+2.54.0.windows.1
+
