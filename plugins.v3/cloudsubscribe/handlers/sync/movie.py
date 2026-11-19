@@ -87,7 +87,6 @@ class MovieSyncProcessor(OwnerDelegator):
 
             # 洗版电影需要先建立现有版本基线，否则同名文件只能被当作普通订阅完成。
             existing_movie = None
-            upgrade_target_exists = False
             if is_best_version:
                 media_server_has_size = False
                 manual_movie = (
@@ -186,7 +185,6 @@ class MovieSyncProcessor(OwnerDelegator):
                     mediainfo,
                 )
                 if existing_movie:
-                    upgrade_target_exists = True
                     existing_dir, existing_name, existing_file = existing_movie
                     baseline_is_4k = baseline_is_4k or self._fork_name_is_4k(existing_name)
                     if self._strm_generate_enabled:
@@ -221,34 +219,26 @@ class MovieSyncProcessor(OwnerDelegator):
                         f"电影 {subscribe.name} 洗版中，"
                         f"现有平台优先级 {movie_history_score}"
                     )
+                elif movie_history_score < 0:
+                    movie_history_size = 0
+                    logger.info(
+                        f"电影 {subscribe.name} 未找到真实网盘旧文件，"
+                        "且没有可用的媒体服务器/整理历史基线，"
+                        "本轮无法建立洗版基线"
+                    )
+                    if manual_upgrade:
+                        return transferred_count
                 else:
-                    if movie_history_score > 0:
-                        # 自维护 fork 修复（上游 issue #42）：媒体服务器/整理
-                        # 历史/手动基线已给出有效评分时，允许基线独立成立，
-                        # 不再因网盘目标目录没有同名实体文件而整体清零。
-                        # 分享+STRM 玩法下源文件分享后即删，此门槛原会让电影
-                        # 洗版永远无法工作。旧文件引用保持为空，后处理替换
-                        # 逻辑会自然跳过旧文件备份与清理；基线大小为 0 时
-                        # 同分候选不做大小比较，仅评分更高才替换。
-                        upgrade_target_exists = True
-                        if movie_history_size < 0:
-                            movie_history_size = 0
-                        logger.info(
-                            f"电影 {subscribe.name} 网盘无实体旧文件，"
-                            f"以已有基线（评分 {movie_history_score}，"
-                            f"{format_size(movie_history_size)}）继续洗版比对"
-                        )
-                    else:
-                        movie_history_score = -1
-                        movie_history_size = 0
-                        logger.info(
-                            f"电影 {subscribe.name} 未找到真实网盘旧文件，"
-                            "本轮无法建立洗版基线"
-                        )
-                        if manual_upgrade:
-                            return transferred_count
+                    # STRM 库只有媒体服务器条目、网盘源文件已删除时，沿用已算出的基线。
+                    logger.info(
+                        f"电影 {subscribe.name} 未找到真实网盘旧文件，"
+                        f"沿用媒体服务器/整理历史基线 {movie_history_score} 继续洗版比对"
+                    )
 
-            if is_best_version and not manual_upgrade and upgrade_target_exists and baseline_is_4k:
+            # 洗版比对以“已取得有效基线”为准，不再要求网盘必须存在实体文件。
+            has_upgrade_baseline = is_best_version and movie_history_score >= 0
+
+            if is_best_version and not manual_upgrade and has_upgrade_baseline and baseline_is_4k:
                 logger.info(
                     f"电影 {subscribe.name} 库内已是 4K，本轮跳过洗版搜索"
                 )
@@ -386,7 +376,7 @@ class MovieSyncProcessor(OwnerDelegator):
                 # 检查是否是刚搜索出尚未真正解锁的延期解锁资源
                 if (resource.get("need_unlock") or resource.get("need_access")) and not share_url:
                     resource_ref = resource.get("resource_ref")
-                    if resource_ref and upgrade_target_exists and movie_history_score >= 0:
+                    if resource_ref and has_upgrade_baseline:
                         preview_name = str(
                             getattr(self._search_handler, "_resource_filter_title", lambda value: "")(
                                 resource
@@ -473,7 +463,7 @@ class MovieSyncProcessor(OwnerDelegator):
                             or (resource.get("magnet_metadata") or {}).get("size")
                         )
                         magnet_upgrade = False
-                        if upgrade_target_exists:
+                        if has_upgrade_baseline:
                             if not self._fork_candidate_better(
                                 movie_history_size, baseline_is_4k,
                                 provider_name, magnet_size,
@@ -567,7 +557,7 @@ class MovieSyncProcessor(OwnerDelegator):
                         is_upgrade = False
                         # 洗版模式下检查是否需要升级资源（补丁 0003：事实判定，不比规则分数）
                         upgrade_old_size = movie_history_size
-                        if upgrade_target_exists:
+                        if has_upgrade_baseline:
                             candidate_size = self._resource_size_bytes(
                                 matched_file.get("size")
                             )

@@ -3,7 +3,7 @@
     "name": "网盘订阅助手（自维护）",
     "description": "整合网盘能力与多渠道资源搜索，自动查找并补充订阅缺失的影视内容。【自维护 fork：基于 odomu 上游 1.7.11，含观影搜索源与电影洗版 STRM 基线修复】",
     "labels": "网盘,订阅,115",
-    "version": "1.7.11.10",
+    "version": "1.7.12.1",
     "icon": "https://raw.githubusercontent.com/odomu/MoviePilot-Plugins/main/icons/cloud.png",
     "author": "odomu / fork by lxc093210",
     "system_version": ">=3.0.0",
