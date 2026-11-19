@@ -3,6 +3,7 @@
 import copy
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,7 +15,7 @@ from app.log import logger
 from app.schemas.types import MediaType
 
 from .utils import extract_ed2k_filename, normalize_season
-from ...core import CloudDriveCapability, OwnerDelegator
+from ...core import CloudDriveCapability, CloudFile, OwnerDelegator
 from ...search.subs_filter import anime_file_candidates
 from ...utils import MediaFileParser
 
@@ -37,6 +38,38 @@ class CommitRequest:
     strm_path: Optional[Path]
     media: Any
     media_data: Dict[str, Any]
+
+
+def _fork_as_cloud_file(file_item: Any) -> Any:
+    """把匹配层产出的普通 dict 文件归一化为 CloudFile（补丁 0010）。
+
+    MediaFileParser.iter_files 会把 CloudFile 展开成普通 dict（仅保留
+    6 个标准字段），而洗版替换路径按对象属性（.name/.id）使用文件，
+    dict 传入会抛 AttributeError 并拖垮整个后处理队列；已是 CloudFile
+    或字段不全时原样返回，不改变既有行为。
+    """
+    if isinstance(file_item, CloudFile) or not isinstance(file_item, Mapping):
+        return file_item
+    raw = dict(file_item)
+    file_id = str(raw.get("id") or raw.get("fid") or raw.get("file_id") or "")
+    name = str(raw.get("name") or raw.get("file_name") or "")
+    if not file_id or not name:
+        return file_item
+    try:
+        size = int(raw.get("size") or 0)
+    except (TypeError, ValueError):
+        size = 0
+    pickcode = raw.get("pickcode") or raw.get("pick_code") or raw.get("pc")
+    return CloudFile(
+        id=file_id,
+        name=name,
+        is_directory=bool(raw.get("is_dir") or raw.get("is_directory")),
+        size=size,
+        sha1=str(raw.get("sha1") or raw.get("sha") or ""),
+        md5=str(raw.get("md5") or ""),
+        playback_values={"pickcode": str(pickcode)} if pickcode else {},
+        native=raw,
+    )
 
 
 class DirectoryFileIndex(dict):
@@ -2437,6 +2470,7 @@ class PostprocessService(OwnerDelegator):
         share_url = str(item.get("share_url") or "")
         upgrade_baseline = item.get("upgrade_baseline") or {}
         for episode, source_file, current_score in matched:
+            source_file = _fork_as_cloud_file(source_file)
             source_name = str(source_file.get("name") or "")
             baseline_key = str(episode) if episode else "movie"
             old_baseline = upgrade_baseline.get(baseline_key) or {}

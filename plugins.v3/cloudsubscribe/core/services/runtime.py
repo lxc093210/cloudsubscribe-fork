@@ -1252,7 +1252,8 @@ class SyncRuntimeService(OwnerDelegator):
                 except Exception as error:
                     logger.error(
                         f"媒体后处理队列执行失败："
-                        f"{len(group['pending_keys'])} 个文件，{error}"
+                        f"{len(group['pending_keys'])} 个文件，{error}",
+                        exc_info=True,
                     )
                     continue
                 for field in ("checked", "completed", "failed"):
